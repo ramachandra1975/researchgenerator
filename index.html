@@ -1,692 +1,1005 @@
-import { useState, useRef, useCallback } from "react";
-
-/* ─────────── API CONFIGURATION ─────────── */
-const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL    = "llama-3.3-70b-versatile";
-const GROQ_KEY      = "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";
-
-const GEMINI_KEY    = "AIzaSyD7Wax8isGytBCThr10svbi44Ch-MhyyAo";
-const GEMINI_FLASH  = "gemini-1.5-flash";
-const GEMINI_PRO    = "gemini-1.5-pro";
-
-/* ─── Primary: Groq · Fallback: Gemini (silent, automatic) ─── */
-async function callGroq(systemPrompt, userPrompt, maxTokens) {
-  const res = await fetch(GROQ_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${GROQ_KEY}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      max_tokens: Math.min(maxTokens, 8000),
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user",   content: userPrompt   },
-      ],
-    }),
-  });
-  if (!res.ok) throw new Error(`Groq ${res.status}`);
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Research Forge — AI Document Generator</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400;1,700&family=DM+Mono:ital,wght@0,400;0,500;1,400&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ink:       #0f0d0a;
+  --paper:     #faf7f2;
+  --cream:     #f2ede4;
+  --gold:      #b8860b;
+  --gold-lt:   #d4a017;
+  --gold-pale: #f0e4b8;
+  --teal:      #1a5c6e;
+  --teal-lt:   #e8f4f7;
+  --rose:      #8b2635;
+  --slate:     #3d3530;
+  --muted:     #7a6e65;
+  --border:    rgba(180,160,120,0.3);
+  --border-strong: rgba(180,160,120,0.6);
+  --shadow:    0 2px 24px rgba(15,13,10,0.08);
 }
 
-async function callGemini(systemPrompt, userPrompt, maxTokens, longForm = false) {
-  const model = longForm ? GEMINI_PRO : GEMINI_FLASH;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-      generationConfig: { maxOutputTokens: Math.min(maxTokens, 8192) },
-    }),
-  });
-  if (!res.ok) throw new Error(`Gemini ${res.status}`);
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Outfit', sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  min-height: 100vh;
+  overflow-x: hidden;
 }
 
-/* Smart router: Groq first → Gemini fallback */
-async function callAI(systemPrompt, userPrompt, maxTokens, lengthId = "") {
-  const isLongForm = ["p20", "p100", "p300"].includes(lengthId);
-  try {
-    return await callGroq(systemPrompt, userPrompt, maxTokens);
-  } catch (groqErr) {
-    console.warn("Groq unavailable, switching to Gemini:", groqErr.message);
-    return await callGemini(systemPrompt, userPrompt, maxTokens, isLongForm);
-  }
+/* Subtle paper texture */
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  pointer-events: none; z-index: 0;
 }
 
-/* ─────────── DOMAIN CONFIG ─────────── */
-const DOMAINS = [
-  { id: "vedic",       label: "Vedic Sciences",    icon: "🕉️",  color: "#c9a84c" },
-  { id: "music",       label: "Music & Ragas",     icon: "🎵",  color: "#c0607a" },
-  { id: "arts",        label: "Fine Arts",          icon: "🎨",  color: "#7b4ddb" },
-  { id: "philosophy",  label: "Philosophy",         icon: "⚡",  color: "#38c9d4" },
-  { id: "microbiology",label: "Microbiology",       icon: "🔬",  color: "#2ecc71" },
-  { id: "science",     label: "Physics / Science",  icon: "⚛️",  color: "#e67e22" },
-  { id: "software",    label: "Software / CS",      icon: "💻",  color: "#3498db" },
-  { id: "literature",  label: "Literature",         icon: "📖",  color: "#e74c3c" },
-  { id: "history",     label: "History",            icon: "🏛️",  color: "#95a5a6" },
-  { id: "economics",   label: "Economics",          icon: "📊",  color: "#1abc9c" },
-  { id: "medicine",    label: "Medicine",           icon: "⚕️",  color: "#ff6b6b" },
-  { id: "culture",     label: "Cultural Studies",   icon: "🌏",  color: "#f39c12" },
-];
+/* ══ LAYOUT ══ */
+.app { position: relative; z-index: 1; display: grid; grid-template-rows: auto 1fr; min-height: 100vh; }
 
-const LENGTH_CATS = [
-  { id: "l5",   label: "5-liner",   desc: "~100 tokens",   pages: "Quick fact",     maxTok: 150,  chunked: false, chunks: 1 },
-  { id: "l20",  label: "20-liner",  desc: "~400 tokens",   pages: "Summary",        maxTok: 500,  chunked: false, chunks: 1 },
-  { id: "l40",  label: "40-liner",  desc: "~800 tokens",   pages: "Introduction",   maxTok: 900,  chunked: false, chunks: 1 },
-  { id: "l50",  label: "50-liner",  desc: "~1k tokens",    pages: "Short article",  maxTok: 1100, chunked: false, chunks: 1 },
-  { id: "l100", label: "100-liner", desc: "~2k tokens",    pages: "Full article",   maxTok: 2200, chunked: false, chunks: 1 },
-  { id: "p3",   label: "3 Pages",   desc: "~3k tokens",    pages: "Report",         maxTok: 3200, chunked: false, chunks: 1 },
-  { id: "p9",   label: "9 Pages",   desc: "~9k tokens",    pages: "Deep dive",      maxTok: 3000, chunked: true,  chunks: 3 },
-  { id: "p20",  label: "20 Pages",  desc: "~20k tokens",   pages: "Research paper", maxTok: 3000, chunked: true,  chunks: 7 },
-  { id: "p100", label: "100 Pages", desc: "~100k tokens",  pages: "Full study",     maxTok: 3000, chunked: true,  chunks: 15, badge: "Pro" },
-  { id: "p300", label: "300 Pages", desc: "~300k tokens",  pages: "Book-length",    maxTok: 3000, chunked: true,  chunks: 30, badge: "Pro" },
-];
-
-const DEPTHS = [
-  { id: "simple",   label: "Simple Summary",   mult: 0.6, icon: "○",  desc: "Plain language, key takeaways" },
-  { id: "normal",   label: "Normal Research",  mult: 1.0, icon: "◐",  desc: "Balanced, citations suggested" },
-  { id: "deep",     label: "Deep Research",    mult: 1.5, icon: "●",  desc: "Analysis, cross-references" },
-  { id: "core",     label: "Core Research",    mult: 2.0, icon: "◉",  desc: "Primary sources, methodology" },
-  { id: "detailed", label: "Detailed Study",   mult: 3.0, icon: "✦",  desc: "Full academic treatment" },
-];
-
-const STRUCTURES = [
-  { id: "article",  label: "Article",           parts: ["Introduction","Body","Conclusion"] },
-  { id: "report",   label: "Formal Report",     parts: ["Abstract","Introduction","Methodology","Findings","Conclusion","References"] },
-  { id: "essay",    label: "Essay",             parts: ["Introduction","Main Arguments","Counter-Analysis","Conclusion"] },
-  { id: "summary",  label: "Executive Summary", parts: ["Overview","Key Points","Implications"] },
-  { id: "tutorial", label: "Tutorial / Guide",  parts: ["Introduction","Prerequisites","Step-by-Step","Examples","Summary"] },
-  { id: "review",   label: "Literature Review", parts: ["Background","Themes","Analysis","Gaps","Future Directions"] },
-];
-
-/* ─────────── DOMAIN SYSTEM PROMPTS ─────────── */
-function domainSystemPrompt(domainId, depthId) {
-  const tones = {
-    vedic:        "You are a Vedic scholar versed in Sanskrit texts, Natya Shastra, 108 Karanas, Nada science, and classical Indian philosophy. Use precise Sanskrit terminology with transliterations.",
-    music:        "You are a musicologist specializing in Indian classical and world music. Use technical musical terminology, cite ragas, talas, and compositional forms accurately.",
-    arts:         "You are an art historian and critic with expertise spanning classical to contemporary. Analyze works with formal, contextual, and aesthetic rigor.",
-    philosophy:   "You are a philosopher fluent across Western analytic, Continental, Eastern, and Indigenous traditions. Engage arguments precisely and cite thinkers.",
-    microbiology: "You are a microbiologist and cell biologist. Use precise scientific nomenclature, cite mechanisms, pathways, and peer-reviewed findings.",
-    science:      "You are a physicist and scientist. Use correct mathematical and scientific language, cite foundational and cutting-edge research.",
-    software:     "You are a senior software engineer. Provide technically precise, implementable explanations with code examples where useful.",
-    literature:   "You are a literary scholar and critic. Analyze texts with close-reading rigor and historical context.",
-    history:      "You are a historian with archival expertise. Contextualize events and cite primary and secondary sources.",
-    economics:    "You are an economist fluent in micro, macro, and behavioral economics. Use precise economic terminology and cite empirical evidence.",
-    medicine:     "You are a medical researcher and clinician. Use precise clinical and biochemical language, cite evidence-based guidelines.",
-    culture:      "You are a cultural studies scholar. Analyze cultural phenomena through multiple theoretical lenses.",
-  };
-  const depthInstructions = {
-    simple:   "Write for a general audience. Avoid jargon. Focus on clarity and accessibility.",
-    normal:   "Write for an educated non-specialist. Balance depth with readability. Suggest key references.",
-    deep:     "Write for specialists. Include analysis, cross-domain connections, and annotated references.",
-    core:     "Write with full academic rigor. Engage primary sources, methodology, epistemological considerations.",
-    detailed: "Produce comprehensive, scholarly, book-quality treatment. Cover all sub-dimensions exhaustively.",
-  };
-  return `${tones[domainId] || tones.science} ${depthInstructions[depthId] || depthInstructions.normal} Output well-structured, original content. Do not use placeholder text.`;
+/* ══ MASTHEAD ══ */
+.masthead {
+  background: var(--ink);
+  color: var(--paper);
+  padding: 0 2.5rem;
+  display: flex; align-items: center; gap: 2rem;
+  height: 60px;
+  border-bottom: 2px solid var(--gold);
+}
+.masthead-logo {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.15rem; font-weight: 900; font-style: italic;
+  color: var(--gold-lt); letter-spacing: 0.01em; white-space: nowrap;
+}
+.masthead-logo span { color: var(--paper); font-style: normal; font-weight: 400; font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; margin-left: 10px; opacity: 0.6; }
+.masthead-domains {
+  display: flex; gap: 4px; flex-wrap: wrap; margin-left: auto;
+}
+.domain-chip {
+  font-size: 10px; padding: 3px 9px; border: 0.5px solid rgba(184,134,11,0.4);
+  border-radius: 20px; color: rgba(240,228,184,0.8);
+  font-family: 'DM Mono', monospace; letter-spacing: 0.04em;
+  white-space: nowrap;
 }
 
-/* ─────────── BUILD PROMPT ─────────── */
-function buildPrompt(topic, keywords, domain, length, depth, structure, chunkIndex, totalChunks, outline) {
-  const domObj = DOMAINS.find(d => d.id === domain);
-  const lenObj = LENGTH_CATS.find(l => l.id === length);
-  const depObj = DEPTHS.find(d => d.id === depth);
-  const strObj = STRUCTURES.find(s => s.id === structure);
-
-  const targetLines = {
-    l5: 5, l20: 20, l40: 40, l50: 50, l100: 100,
-    p3: 120, p9: 360, p20: 800, p100: 4000, p300: 12000,
-  }[length] || 50;
-
-  const linesPerChunk = Math.ceil(targetLines / totalChunks);
-
-  if (totalChunks > 1 && chunkIndex === 0) {
-    return `Create a detailed outline for a ${lenObj.label} ${depObj.label} on:
-
-Topic: ${topic}
-Domain: ${domObj.label}
-Keywords: ${keywords || "none"}
-Structure: ${strObj.label} — sections: ${strObj.parts.join(", ")}
-
-Output ONLY the outline as a numbered list with 3-5 bullet sub-points each. Be specific. No prose.`;
-  }
-
-  if (totalChunks > 1 && chunkIndex > 0) {
-    const section = strObj.parts[(chunkIndex - 1) % strObj.parts.length];
-    return `Writing section "${section}" of a ${lenObj.label} ${depObj.label} on: "${topic}"
-
-Working outline:
-${outline}
-
-Write ONLY the "${section}" section. Target ~${linesPerChunk} lines. ${depObj.desc}. Begin directly — no preamble.`;
-  }
-
-  return `Write a ${lenObj.pages} (approximately ${linesPerChunk} lines) on the following topic.
-
-Domain: ${domObj.label}
-Topic: ${topic}
-Keywords: ${keywords || "none"}
-Structure: ${strObj.parts.join(" → ")}
-Depth: ${depObj.desc}
-
-Begin with the Introduction. Use clear section headers. Write ~${linesPerChunk} lines total.`;
+/* ══ API KEY BANNER ══ */
+.api-banner {
+  background: var(--ink);
+  border-bottom: 1px solid var(--border-strong);
+  padding: 10px 2.5rem;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+}
+.api-label {
+  font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: 0.06em;
+  color: var(--gold-lt); white-space: nowrap; text-transform: uppercase;
+}
+.api-input-wrap { position: relative; flex: 1; min-width: 260px; max-width: 460px; }
+.api-input {
+  width: 100%;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(184,134,11,0.4);
+  border-radius: 5px;
+  padding: 7px 90px 7px 12px;
+  color: #fff;
+  font-family: 'DM Mono', monospace; font-size: 12px;
+  outline: none; transition: border-color 0.2s;
+  letter-spacing: 0.02em;
+}
+.api-input::placeholder { color: rgba(255,255,255,0.3); }
+.api-input:focus { border-color: var(--gold-lt); }
+.api-toggle {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; color: rgba(255,255,255,0.4);
+  font-family: 'DM Mono', monospace; font-size: 10px; cursor: pointer;
+  letter-spacing: 0.04em; padding: 2px 6px;
+  transition: color 0.15s;
+}
+.api-toggle:hover { color: var(--gold-lt); }
+.api-status-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.2);
+  transition: all 0.3s;
+}
+.api-status-dot.active { background: #4ade80; border-color: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,0.6); }
+.api-hint {
+  font-size: 11px; color: rgba(255,255,255,0.35);
+  font-family: 'DM Mono', monospace; letter-spacing: 0.02em; white-space: nowrap;
 }
 
-/* ─────────── STYLES ─────────── */
-const css = `
-  @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;600&family=Outfit:wght@300;400;500;600&display=swap');
+/* ══ MAIN CONTENT ══ */
+.main { display: grid; grid-template-columns: 340px 1fr; height: calc(100vh - 60px - 47px); }
 
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* ══ LEFT PANEL — Wizard ══ */
+.wizard {
+  background: var(--cream);
+  border-right: 1px solid var(--border-strong);
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+.wizard-header {
+  padding: 1.5rem 1.5rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--paper);
+}
+.wizard-title {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.3rem; font-weight: 700; color: var(--ink); margin-bottom: 4px;
+}
+.wizard-sub { font-size: 12px; color: var(--muted); line-height: 1.6; }
 
-  :root {
-    --bg: #09090f;
-    --surface: #111118;
-    --surface2: #18181f;
-    --surface3: #20202a;
-    --border: rgba(255,255,255,0.07);
-    --border2: rgba(255,255,255,0.14);
-    --text: #eeeaf8;
-    --text2: #888099;
-    --text3: #4a4460;
-    --gold: #c9a84c;
-    --gold2: #e8cc7a;
-    --accent: #7b4ddb;
-    --groq-green: #4ade80;
-    --gemini-blue: #60a5fa;
-    --radius: 12px;
-    --radius-sm: 7px;
-    --mono: 'JetBrains Mono', monospace;
-    --serif: 'Playfair Display', Georgia, serif;
-    --sans: 'Outfit', sans-serif;
-  }
+.wizard-body { flex: 1; padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 1.2rem; }
 
-  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+.field-group { display: flex; flex-direction: column; gap: 6px; }
+.field-label {
+  font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--muted); display: flex; align-items: center; gap: 6px;
+}
+.field-label .step-num {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--gold); color: #fff;
+  font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.field-input {
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 9px 12px;
+  font-family: 'Outfit', sans-serif; font-size: 14px;
+  color: var(--ink); outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.field-input:focus { border-color: var(--gold); box-shadow: 0 0 0 3px var(--gold-pale); }
+.field-input::placeholder { color: var(--muted); opacity: 0.6; }
+textarea.field-input { resize: vertical; min-height: 64px; line-height: 1.55; }
 
-  .rf-wrap { max-width: 1080px; margin: 0 auto; padding: 2rem 1.5rem 5rem; }
+/* Length category grid */
+.length-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+}
+.length-card {
+  background: var(--paper);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px; padding: 8px 10px;
+  cursor: pointer; transition: all 0.15s; position: relative;
+  text-align: left;
+}
+.length-card:hover { border-color: var(--gold); background: var(--gold-pale); }
+.length-card.active { border-color: var(--gold); background: var(--gold-pale); box-shadow: 0 0 0 2px var(--gold); }
+.length-card .lc-name { font-size: 12px; font-weight: 600; color: var(--ink); }
+.length-card .lc-tokens {
+  font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted);
+  margin-top: 2px; letter-spacing: 0.04em;
+}
+.length-card .lc-pro {
+  position: absolute; top: 4px; right: 6px;
+  font-size: 8px; font-family: 'DM Mono', monospace;
+  color: var(--gold); letter-spacing: 0.06em;
+}
 
-  .rf-header { text-align: center; padding: 3rem 1rem 2rem; border-bottom: 0.5px solid var(--border); margin-bottom: 2.5rem; }
-  .rf-header .badge { display: inline-block; font-family: var(--mono); font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: var(--gold); border: 0.5px solid rgba(201,168,76,0.3); padding: 4px 12px; border-radius: 20px; margin-bottom: 1.2rem; }
-  .rf-header h1 { font-family: var(--serif); font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 700; line-height: 1.1; margin-bottom: 0.6rem; }
-  .rf-header h1 em { font-style: italic; color: var(--gold); }
-  .rf-header p { font-size: 14px; color: var(--text2); max-width: 540px; margin: 0 auto; line-height: 1.7; }
+/* Select */
+.field-select {
+  width: 100%;
+  background: var(--paper);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px; padding: 9px 12px;
+  font-family: 'Outfit', sans-serif; font-size: 14px;
+  color: var(--ink); outline: none; cursor: pointer;
+  transition: border-color 0.2s;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%237a6e65' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  padding-right: 32px;
+}
+.field-select:focus { border-color: var(--gold); }
 
-  /* API status bar */
-  .api-bar { display: flex; align-items: center; justify-content: center; gap: 16px; margin: 1rem 0 2rem; flex-wrap: wrap; }
-  .api-pill { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10px; padding: 4px 10px; border-radius: 20px; border: 0.5px solid; letter-spacing: 0.04em; }
-  .api-pill.groq { border-color: rgba(74,222,128,0.4); color: var(--groq-green); background: rgba(74,222,128,0.08); }
-  .api-pill.gemini { border-color: rgba(96,165,250,0.4); color: var(--gemini-blue); background: rgba(96,165,250,0.08); }
-  .api-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 2s infinite; }
-  .api-pill.gemini .dot { animation: none; opacity: 0.5; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+/* Token estimate */
+.token-estimate {
+  background: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px 12px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.te-label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.te-value { font-family: 'DM Mono', monospace; font-size: 13px; color: var(--teal); font-weight: 500; }
+.te-bar-wrap { width: 100%; background: rgba(180,160,120,0.2); border-radius: 3px; height: 3px; margin-top: 6px; }
+.te-bar { height: 100%; background: var(--gold); border-radius: 3px; transition: width 0.4s ease; }
 
-  .step-indicator { display: flex; align-items: center; gap: 0; margin-bottom: 2rem; overflow-x: auto; padding-bottom: 4px; }
-  .step-dot { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--text3); white-space: nowrap; }
-  .step-dot.active { color: var(--gold); }
-  .step-dot.done { color: var(--text2); }
-  .step-dot .num { width: 24px; height: 24px; border-radius: 50%; border: 0.5px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 10px; }
-  .step-dot.active .num { background: var(--gold); border-color: var(--gold); color: #000; }
-  .step-dot.done .num { background: var(--text3); border-color: var(--text3); color: var(--bg); }
-  .step-line { flex: 1; height: 0.5px; background: var(--border); min-width: 20px; }
+/* Structure checkboxes */
+.struct-checks { display: flex; flex-wrap: wrap; gap: 6px; }
+.struct-chip {
+  padding: 4px 10px; border-radius: 20px;
+  border: 1px solid var(--border-strong);
+  background: var(--paper); font-size: 11px; color: var(--muted);
+  cursor: pointer; transition: all 0.15s; user-select: none;
+}
+.struct-chip.active { border-color: var(--teal); background: var(--teal-lt); color: var(--teal); }
 
-  .rf-section { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 1.6rem; margin-bottom: 1.2rem; }
-  .rf-section h3 { font-family: var(--serif); font-size: 1.1rem; color: var(--text); margin-bottom: 0.4rem; }
-  .rf-section .hint { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-bottom: 1.2rem; }
+/* Generate button */
+.gen-btn {
+  width: 100%;
+  background: var(--ink);
+  color: var(--gold-lt);
+  border: none; border-radius: 8px;
+  padding: 14px;
+  font-family: 'Playfair Display', serif; font-size: 16px; font-weight: 700; font-style: italic;
+  cursor: pointer; letter-spacing: 0.02em;
+  transition: background 0.2s, transform 0.1s;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  margin-top: auto;
+}
+.gen-btn:hover:not(:disabled) { background: #2a2520; transform: translateY(-1px); }
+.gen-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.gen-btn .btn-arrow { font-style: normal; transition: transform 0.2s; }
+.gen-btn:hover .btn-arrow { transform: translateX(4px); }
 
-  .domain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-  .domain-card { padding: 10px 12px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.15s; background: var(--surface2); display: flex; align-items: center; gap: 10px; }
-  .domain-card:hover { border-color: var(--border2); background: var(--surface3); }
-  .domain-card.selected { border-color: var(--gold); background: rgba(201,168,76,0.07); }
-  .domain-card .icon { font-size: 18px; flex-shrink: 0; }
-  .domain-card .name { font-size: 12px; font-weight: 500; color: var(--text2); line-height: 1.3; }
-  .domain-card.selected .name { color: var(--gold); }
+.wizard-footer { padding: 1rem 1.5rem; border-top: 1px solid var(--border); }
 
-  .length-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
-  .length-card { padding: 12px 14px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.15s; background: var(--surface2); position: relative; }
-  .length-card:hover { border-color: var(--border2); }
-  .length-card.selected { border-color: var(--gold); background: rgba(201,168,76,0.06); }
-  .length-card .lc-label { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
-  .length-card.selected .lc-label { color: var(--gold); }
-  .length-card .lc-desc { font-family: var(--mono); font-size: 10px; color: var(--text3); }
-  .length-card .lc-pages { font-size: 11px; color: var(--text2); margin-top: 4px; }
-  .pro-badge { position: absolute; top: 8px; right: 8px; background: rgba(123,77,219,0.2); border: 0.5px solid rgba(123,77,219,0.4); color: #b388ff; font-family: var(--mono); font-size: 9px; padding: 1px 5px; border-radius: 3px; }
+/* ══ RIGHT PANEL — Output ══ */
+.output-panel {
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  background: var(--paper);
+}
+.output-toolbar {
+  padding: 0.75rem 1.75rem;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 10px;
+  background: var(--cream); flex-shrink: 0;
+}
+.ot-label { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); flex: 1; }
+.ot-btn {
+  padding: 5px 14px; border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  background: var(--paper); color: var(--slate);
+  font-family: 'DM Mono', monospace; font-size: 11px;
+  cursor: pointer; transition: all 0.15s; letter-spacing: 0.04em;
+}
+.ot-btn:hover { border-color: var(--gold); color: var(--gold); }
+.ot-progress {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'DM Mono', monospace; font-size: 11px; color: var(--teal);
+  display: none;
+}
+.ot-progress .spinner { animation: spin 1s linear infinite; display: inline-block; }
+@keyframes spin { from{transform:rotate(0deg)}to{transform:rotate(360deg)} }
 
-  .depth-row { display: flex; flex-direction: column; gap: 6px; }
-  .depth-btn { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--surface2); transition: all 0.15s; }
-  .depth-btn:hover { border-color: var(--border2); }
-  .depth-btn.selected { border-color: var(--gold); background: rgba(201,168,76,0.06); }
-  .depth-btn .di { font-family: var(--mono); font-size: 14px; color: var(--text3); width: 20px; text-align: center; }
-  .depth-btn.selected .di { color: var(--gold); }
-  .depth-btn .dl { font-size: 13px; font-weight: 500; color: var(--text2); flex: 1; }
-  .depth-btn.selected .dl { color: var(--text); }
-  .depth-btn .dd { font-size: 11px; color: var(--text3); }
+.output-scroll {
+  flex: 1; overflow-y: auto; padding: 2.5rem 3rem;
+}
 
-  .struct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
-  .struct-card { padding: 10px 12px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--surface2); transition: all 0.15s; }
-  .struct-card:hover { border-color: var(--border2); }
-  .struct-card.selected { border-color: var(--accent); background: rgba(123,77,219,0.06); }
-  .struct-card .sc-label { font-size: 12px; font-weight: 600; color: var(--text2); margin-bottom: 4px; }
-  .struct-card.selected .sc-label { color: #b388ff; }
-  .struct-card .sc-parts { font-size: 10px; color: var(--text3); font-family: var(--mono); line-height: 1.6; }
+/* ── Document rendering ── */
+.doc-cover {
+  text-align: center; padding: 3rem 2rem 2rem;
+  border-bottom: 2px solid var(--border-strong); margin-bottom: 2rem;
+}
+.doc-cover .doc-domain-tag {
+  display: inline-block;
+  font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--gold);
+  border: 1px solid var(--gold); padding: 3px 12px;
+  border-radius: 20px; margin-bottom: 1rem;
+}
+.doc-cover h1 {
+  font-family: 'Playfair Display', serif;
+  font-size: 2.2rem; font-weight: 900; color: var(--ink);
+  line-height: 1.15; margin-bottom: 0.75rem;
+}
+.doc-cover .doc-meta {
+  font-family: 'DM Mono', monospace; font-size: 11px;
+  color: var(--muted); letter-spacing: 0.06em;
+  display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap;
+}
+.doc-cover .doc-meta span { border: 0.5px solid var(--border-strong); padding: 2px 8px; border-radius: 3px; }
 
-  .rf-input { width: 100%; background: var(--surface2); border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-family: var(--sans); font-size: 14px; outline: none; transition: border-color 0.15s; }
-  .rf-input:focus { border-color: var(--gold); }
-  .rf-input::placeholder { color: var(--text3); }
-  .input-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
-  .input-label { font-family: var(--mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text3); display: block; margin-bottom: 5px; }
+.doc-body {
+  font-family: 'Outfit', sans-serif;
+  font-size: 15px; line-height: 1.9; color: var(--slate);
+  max-width: 720px; margin: 0 auto;
+}
+.doc-body h2 {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.35rem; font-weight: 700; color: var(--ink);
+  margin: 2rem 0 0.75rem; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.doc-body h3 {
+  font-family: 'Playfair Display', serif;
+  font-size: 1.1rem; font-style: italic; color: var(--teal);
+  margin: 1.5rem 0 0.5rem;
+}
+.doc-body p { margin-bottom: 1rem; }
+.doc-body ul, .doc-body ol { padding-left: 1.5rem; margin-bottom: 1rem; }
+.doc-body li { margin-bottom: 0.4rem; }
+.doc-body blockquote {
+  border-left: 3px solid var(--gold);
+  padding: 0.75rem 1.25rem;
+  background: var(--gold-pale); margin: 1.5rem 0;
+  font-style: italic; border-radius: 0 6px 6px 0;
+  color: var(--slate);
+}
+.doc-body .ref-block {
+  background: var(--cream); border: 1px solid var(--border);
+  border-radius: 6px; padding: 1rem 1.25rem; margin-top: 2rem;
+}
+.doc-body .ref-block h4 { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 0.75rem; }
+.doc-body .ref-item { font-size: 13px; color: var(--muted); margin-bottom: 0.4rem; }
 
-  .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius); border: 0.5px solid rgba(201,168,76,0.4); background: linear-gradient(135deg, rgba(201,168,76,0.12), rgba(201,168,76,0.06)); color: var(--gold2); font-family: var(--serif); font-size: 16px; font-style: italic; cursor: pointer; transition: all 0.2s; margin-top: 1rem; letter-spacing: 0.02em; }
-  .gen-btn:hover:not(:disabled) { background: rgba(201,168,76,0.16); border-color: var(--gold); }
-  .gen-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Chunk progress */
+.chunk-log {
+  background: var(--cream); border: 1px solid var(--border);
+  border-radius: 6px; padding: 1rem 1.25rem; margin: 0 auto 1.5rem;
+  max-width: 720px; font-family: 'DM Mono', monospace; font-size: 11px;
+  color: var(--muted); line-height: 2;
+}
+.chunk-log .cl-line { display: flex; gap: 8px; align-items: center; }
+.chunk-log .cl-ok { color: #16a34a; }
+.chunk-log .cl-pending { color: var(--gold); }
+.chunk-log .cl-spin { animation: spin 1s linear infinite; display: inline-block; }
 
-  /* provider tag shown during generation */
-  .provider-tag { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10px; padding: 2px 8px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
-  .provider-tag.groq { background: rgba(74,222,128,0.1); border: 0.5px solid rgba(74,222,128,0.3); color: var(--groq-green); }
-  .provider-tag.gemini { background: rgba(96,165,250,0.1); border: 0.5px solid rgba(96,165,250,0.3); color: var(--gemini-blue); }
+/* Empty state */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; text-align: center; padding: 3rem;
+  color: var(--muted); gap: 1rem;
+}
+.empty-icon {
+  font-size: 3rem; opacity: 0.4;
+}
+.empty-title {
+  font-family: 'Playfair Display', serif; font-size: 1.4rem;
+  font-style: italic; color: var(--ink); opacity: 0.5;
+}
+.empty-sub { font-size: 13px; line-height: 1.7; max-width: 380px; }
 
-  .progress-wrap { margin: 1rem 0; }
-  .progress-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--text3); margin-bottom: 6px; }
-  .progress-track { height: 3px; background: var(--surface3); border-radius: 2px; overflow: hidden; }
-  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--gold), var(--gold2)); border-radius: 2px; transition: width 0.4s ease; }
-  .phase-log { font-family: var(--mono); font-size: 10px; color: var(--text3); margin-top: 8px; line-height: 1.8; max-height: 80px; overflow-y: auto; }
-  .phase-log .pl-ok { color: #4ade80; }
-  .phase-log .pl-run { color: var(--gold); }
-  .phase-log .pl-fallback { color: var(--gemini-blue); }
+/* Error state */
+.error-box {
+  background: #fef2f2; border: 1px solid #fca5a5;
+  border-radius: 8px; padding: 1rem 1.25rem;
+  color: #b91c1c; font-size: 13px; line-height: 1.7;
+  max-width: 720px; margin: 0 auto 1.5rem;
+}
 
-  .output-wrap { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 1.5rem; }
-  .output-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 0.5px solid var(--border); background: var(--surface2); }
-  .output-topbar .title { font-family: var(--serif); font-size: 14px; font-style: italic; color: var(--text); }
-  .output-topbar .meta { font-family: var(--mono); font-size: 10px; color: var(--text3); }
-  .output-actions { display: flex; gap: 6px; }
-  .out-btn { padding: 5px 12px; border: 0.5px solid var(--border2); border-radius: 5px; background: var(--surface3); color: var(--text2); font-family: var(--mono); font-size: 10px; cursor: pointer; transition: all 0.15s; }
-  .out-btn:hover { color: var(--gold); border-color: var(--gold); }
-  .output-content { padding: 1.8rem 2rem; font-family: var(--sans); font-size: 14px; line-height: 1.85; color: var(--text2); max-height: 70vh; overflow-y: auto; white-space: pre-wrap; }
-  .output-content h1, .output-content h2, .output-content h3 { font-family: var(--serif); color: var(--text); }
-  .output-content h1 { font-size: 1.5rem; margin: 1.5rem 0 0.8rem; border-bottom: 0.5px solid var(--border); padding-bottom: 0.5rem; }
-  .output-content h2 { font-size: 1.2rem; margin: 1.2rem 0 0.6rem; color: var(--gold2); }
-  .output-content h3 { font-size: 1rem; margin: 1rem 0 0.4rem; color: var(--text); }
-  .output-content p { margin-bottom: 0.8rem; }
-  .cursor-blink { display: inline-block; width: 8px; height: 14px; background: var(--gold); animation: blink 0.8s step-end infinite; vertical-align: middle; margin-left: 2px; }
-  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
 
-  .token-meter { display: flex; gap: 12px; padding: 8px 16px; border-top: 0.5px solid var(--border); font-family: var(--mono); font-size: 10px; color: var(--text3); flex-wrap: wrap; }
-  .tm-item { display: flex; gap: 5px; align-items: center; }
-  .tm-val { color: var(--gold); }
-  .tm-provider { color: var(--groq-green); }
-  .tm-provider.gemini { color: var(--gemini-blue); }
+/* ── Responsive ── */
+@media (max-width: 900px) {
+  .main { grid-template-columns: 1fr; height: auto; }
+  .wizard { border-right: none; border-bottom: 1px solid var(--border-strong); }
+  .output-panel { min-height: 60vh; }
+  .masthead-domains { display: none; }
+  .output-scroll { padding: 1.5rem 1.25rem; }
+}
+@media (max-width: 600px) {
+  .api-banner { padding: 10px 1rem; }
+  .masthead { padding: 0 1rem; }
+  .wizard-body { padding: 1rem; }
+}
+</style>
+</head>
+<body>
+<div class="app">
 
-  .reset-btn { display: flex; align-items: center; gap: 6px; background: none; border: 0.5px solid var(--border); border-radius: 6px; color: var(--text3); font-family: var(--mono); font-size: 10px; padding: 5px 12px; cursor: pointer; transition: all 0.15s; margin-top: 1rem; }
-  .reset-btn:hover { color: var(--text); border-color: var(--border2); }
+  <!-- MASTHEAD -->
+  <header class="masthead">
+    <div class="masthead-logo">
+      Research Forge
+      <span>by Cultural Musings</span>
+    </div>
+    <div class="masthead-domains">
+      <span class="domain-chip">Music</span>
+      <span class="domain-chip">Philosophy</span>
+      <span class="domain-chip">Microbiology</span>
+      <span class="domain-chip">Fine Arts</span>
+      <span class="domain-chip">Science</span>
+      <span class="domain-chip">Vedic</span>
+      <span class="domain-chip">Software</span>
+    </div>
+  </header>
 
-  @media (max-width: 600px) {
-    .input-row { grid-template-columns: 1fr; }
-    .domain-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
-    .output-content { padding: 1rem; font-size: 13px; }
-  }
-`;
+  <!-- API KEY BANNER -->
+  <div class="api-banner">
+    <span class="api-label">Anthropic API Key</span>
+    <div class="api-input-wrap">
+      <input
+        type="password"
+        id="apiKey"
+        class="api-input"
+        placeholder="Paste your sk-ant-... key here"
+        autocomplete="off"
+        spellcheck="false"
+        oninput="onKeyInput()"
+      >
+      <button class="api-toggle" onclick="toggleKeyVis()" id="keyToggle">show</button>
+    </div>
+    <div class="api-status-dot" id="statusDot"></div>
+    <span class="api-hint" id="apiHint">Key stored in memory only · not saved anywhere</span>
+  </div>
 
-/* ─────────── COMPONENT ─────────── */
-export default function ResearchForge() {
-  const [step, setStep]           = useState(1);
-  const [domain, setDomain]       = useState("");
-  const [length, setLength]       = useState("l20");
-  const [depth, setDepth]         = useState("normal");
-  const [structure, setStructure] = useState("article");
-  const [topic, setTopic]         = useState("");
-  const [keywords, setKeywords]   = useState("");
-  const [generating, setGenerating] = useState(false);
-  const [progress, setProgress]   = useState(0);
-  const [phases, setPhases]       = useState([]);
-  const [output, setOutput]       = useState("");
-  const [tokenCount, setTokenCount] = useState(0);
-  const [activeProvider, setActiveProvider] = useState("groq"); // "groq" | "gemini"
-  const [error, setError]         = useState("");
-  const outputRef = useRef(null);
+  <!-- MAIN AREA -->
+  <div class="main">
 
-  const lenObj = LENGTH_CATS.find(l => l.id === length) || LENGTH_CATS[1];
-  const depObj = DEPTHS.find(d => d.id === depth)       || DEPTHS[1];
-  const strObj = STRUCTURES.find(s => s.id === structure)|| STRUCTURES[0];
-  const domObj = DOMAINS.find(d => d.id === domain);
+    <!-- LEFT: WIZARD -->
+    <aside class="wizard">
+      <div class="wizard-header">
+        <div class="wizard-title">Configure Your Document</div>
+        <div class="wizard-sub">Topic-specific research generation · 13 domains · 10 length categories</div>
+      </div>
 
-  const addPhase = (msg, type = "run") => setPhases(p => [...p, { msg, type }]);
+      <div class="wizard-body">
 
-  const generate = useCallback(async () => {
-    if (!domain || !topic.trim()) { setError("Please select a domain and enter a topic."); return; }
-    setError("");
-    setGenerating(true);
-    setOutput("");
-    setProgress(0);
-    setPhases([]);
-    setTokenCount(0);
-    setActiveProvider("groq");
-    setStep(3);
-
-    const sysPrompt   = domainSystemPrompt(domain, depth);
-    const totalChunks = lenObj.chunked ? Math.min(lenObj.chunks, strObj.parts.length + 1) : 1;
-    let finalOutput   = "";
-    let outline       = "";
-    let tokensUsed    = 0;
-    let usedProvider  = "groq";
-
-    /* Wrapper that tracks which provider was used */
-    const smartCall = async (sys, user, maxTok) => {
-      try {
-        const text = await callGroq(sys, user, maxTok);
-        setActiveProvider("groq");
-        usedProvider = "groq";
-        return text;
-      } catch {
-        addPhase("Groq busy → switching to Gemini…", "fallback");
-        setActiveProvider("gemini");
-        usedProvider = "gemini";
-        const isLong = ["p20","p100","p300"].includes(length);
-        return await callGemini(sys, user, maxTok, isLong);
-      }
-    };
-
-    try {
-      for (let i = 0; i < totalChunks; i++) {
-        const pct = Math.round((i / totalChunks) * 100);
-        setProgress(pct);
-
-        let phaseLabel;
-        if (totalChunks === 1)  phaseLabel = "Generating content…";
-        else if (i === 0)       phaseLabel = "Building outline…";
-        else                    phaseLabel = `Writing: ${strObj.parts[(i - 1) % strObj.parts.length]}`;
-
-        addPhase(phaseLabel, "run");
-
-        const userPrompt = buildPrompt(topic, keywords, domain, length, depth, structure, i, totalChunks, outline);
-        const maxTok     = Math.round(lenObj.maxTok * depObj.mult);
-        const text       = await smartCall(sysPrompt, userPrompt, Math.min(maxTok, 8000));
-
-        tokensUsed += text.split(/\s+/).length * 1.3;
-        setTokenCount(Math.round(tokensUsed));
-
-        if (i === 0 && totalChunks > 1) {
-          outline      = text;
-          finalOutput  = `## Outline\n\n${text}\n\n---\n\n`;
-          addPhase("Outline ready ✓", "ok");
-        } else {
-          finalOutput += text + "\n\n";
-          addPhase(`${strObj.parts[(i - 1) % strObj.parts.length]} ✓`, "ok");
-        }
-
-        setOutput(finalOutput);
-        if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight;
-        setProgress(Math.round(((i + 1) / totalChunks) * 100));
-      }
-      setProgress(100);
-      addPhase(`Complete ✓  [${usedProvider === "groq" ? "Groq · llama-3.3-70b" : "Gemini · fallback"}]`, "ok");
-    } catch (e) {
-      setError("Generation error: " + e.message);
-      addPhase("Error: " + e.message, "err");
-    } finally {
-      setGenerating(false);
-    }
-  }, [domain, topic, keywords, length, depth, structure, lenObj, depObj, strObj]);
-
-  const copyOutput    = () => { navigator.clipboard.writeText(output).catch(() => {}); };
-  const downloadOutput = () => {
-    const blob = new Blob([output], { type: "text/plain" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
-    a.href     = url;
-    a.download = `${topic.slice(0, 40).replace(/\s+/g, "_")}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-  const reset = () => { setStep(1); setOutput(""); setPhases([]); setProgress(0); setError(""); setTopic(""); setKeywords(""); setDomain(""); };
-
-  const canGenerate = domain && topic.trim() && !generating;
-
-  return (
-    <>
-      <style>{css}</style>
-      <div className="rf-wrap">
-
-        {/* HEADER */}
-        <div className="rf-header">
-          <div className="badge">✦ Research Forge · culturalmusings.com</div>
-          <h1>Topic-Specific <em>Research Generator</em></h1>
-          <p>From 5-liners to 300-page studies — domain-aware, depth-calibrated content for researchers, students & freelancers.</p>
+        <!-- Step 1: Topic -->
+        <div class="field-group">
+          <label class="field-label">
+            <span class="step-num">1</span>
+            Topic / Subject
+          </label>
+          <input type="text" class="field-input" id="topicInput" placeholder="e.g. Raga Bhairavi and its therapeutic properties" oninput="updateEstimate()">
         </div>
 
-        {/* API STATUS BAR */}
-        <div className="api-bar">
-          <div className="api-pill groq">
-            <span className="dot"></span>
-            Groq · llama-3.3-70b · primary
-          </div>
-          <div className="api-pill gemini">
-            <span className="dot"></span>
-            Gemini 1.5 · auto-fallback
-          </div>
+        <!-- Step 2: Keywords -->
+        <div class="field-group">
+          <label class="field-label">
+            <span class="step-num">2</span>
+            Keywords (optional)
+          </label>
+          <input type="text" class="field-input" id="keywordsInput" placeholder="e.g. nada chikitsa, cortisol, morning ragas">
         </div>
 
-        {/* STEP INDICATOR */}
-        <div className="step-indicator">
-          {["Domain & Topic", "Format & Depth", "Generate"].map((s, i) => (
-            <>
-              <div key={i} className={`step-dot ${step === i + 1 ? "active" : step > i + 1 ? "done" : ""}`}>
-                <div className="num">{step > i + 1 ? "✓" : i + 1}</div>
-                {s}
-              </div>
-              {i < 2 && <div className="step-line" key={`line-${i}`} />}
-            </>
-          ))}
+        <!-- Step 3: Domain -->
+        <div class="field-group">
+          <label class="field-label">
+            <span class="step-num">3</span>
+            Research Domain
+          </label>
+          <select class="field-select" id="domainSelect" onchange="updateEstimate()">
+            <option value="music">🎵 Music & Raga Science</option>
+            <option value="fine-arts">🎨 Fine Arts & Aesthetics</option>
+            <option value="philosophy">🕉️ Philosophy & Vedanta</option>
+            <option value="microbiology">🔬 Microbiology & Life Sciences</option>
+            <option value="science">⚗️ Science & Physics</option>
+            <option value="software">💻 Software & Technology</option>
+            <option value="vedic">🛕 Vedic Sciences & Culture</option>
+            <option value="literature">📖 Literature & Linguistics</option>
+            <option value="history">🏛️ History & Archaeology</option>
+            <option value="economics">📊 Economics & Policy</option>
+            <option value="law">⚖️ Law & Jurisprudence</option>
+            <option value="medicine">🏥 Medicine & Health</option>
+            <option value="sacred-geometry">📐 Sacred Geometry & Mathematics</option>
+          </select>
         </div>
 
-        {/* ── STEP 1: DOMAIN + TOPIC ── */}
-        {step <= 2 && (
-          <>
-            <div className="rf-section">
-              <h3>1. Select your domain</h3>
-              <div className="hint">// Prompts and tone are calibrated per domain</div>
-              <div className="domain-grid">
-                {DOMAINS.map(d => (
-                  <div key={d.id}
-                    className={`domain-card ${domain === d.id ? "selected" : ""}`}
-                    onClick={() => setDomain(d.id)}>
-                    <span className="icon">{d.icon}</span>
-                    <span className="name">{d.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rf-section">
-              <h3>2. Your topic</h3>
-              <div className="hint">// Be specific — the more precise, the richer the output</div>
-              <div className="input-row">
-                <div>
-                  <label className="input-label">Topic / Subject *</label>
-                  <input
-                    className="rf-input"
-                    placeholder={
-                      domain === "vedic"  ? "e.g. The 108 Karanas and Nakshatra correspondences" :
-                      domain === "music"  ? "e.g. Raga Bhairavi — therapeutic applications" :
-                      "Enter your research topic…"
-                    }
-                    value={topic}
-                    onChange={e => setTopic(e.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className="input-label">Keywords (optional)</label>
-                  <input
-                    className="rf-input"
-                    placeholder="e.g. neuroscience, consciousness, healing"
-                    value={keywords}
-                    onChange={e => setKeywords(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
-                <button
-                  className="gen-btn"
-                  style={{ width: "auto", padding: "10px 28px", fontSize: 13 }}
-                  onClick={() => {
-                    if (domain && topic.trim()) setStep(2);
-                    else setError("Select a domain and enter a topic first.");
-                  }}>
-                  Continue → Format & Depth
-                </button>
-              </div>
-            </div>
-
-            {error && <div style={{ color: "#f87171", fontFamily: "var(--mono)", fontSize: 11, marginTop: 8 }}>⚠ {error}</div>}
-          </>
-        )}
-
-        {/* ── STEP 2: FORMAT + DEPTH ── */}
-        {step === 2 && (
-          <>
-            <div className="rf-section">
-              <h3>3. Output length</h3>
-              <div className="hint">// Token budget scales automatically with depth multiplier</div>
-              <div className="length-grid">
-                {LENGTH_CATS.map(l => (
-                  <div key={l.id}
-                    className={`length-card ${length === l.id ? "selected" : ""}`}
-                    onClick={() => setLength(l.id)}>
-                    {l.badge && <span className="pro-badge">{l.badge}</span>}
-                    <div className="lc-label">{l.label}</div>
-                    <div className="lc-desc">{l.desc}</div>
-                    <div className="lc-pages">{l.pages}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rf-section">
-              <h3>4. Research depth</h3>
-              <div className="hint">// Multiplies token budget and shifts academic register</div>
-              <div className="depth-row">
-                {DEPTHS.map(d => (
-                  <div key={d.id}
-                    className={`depth-btn ${depth === d.id ? "selected" : ""}`}
-                    onClick={() => setDepth(d.id)}>
-                    <span className="di">{d.icon}</span>
-                    <span className="dl">{d.label}</span>
-                    <span className="dd">{d.desc} · ×{d.mult}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="rf-section">
-              <h3>5. Document structure</h3>
-              <div className="hint">// Sections adapt to domain-specific conventions</div>
-              <div className="struct-grid">
-                {STRUCTURES.map(s => (
-                  <div key={s.id}
-                    className={`struct-card ${structure === s.id ? "selected" : ""}`}
-                    onClick={() => setStructure(s.id)}>
-                    <div className="sc-label">{s.label}</div>
-                    <div className="sc-parts">{s.parts.join(" → ")}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {error && <div style={{ color: "#f87171", fontFamily: "var(--mono)", fontSize: 11, marginTop: 8 }}>⚠ {error}</div>}
-
-            {/* Config summary */}
-            <div style={{ padding: "12px 16px", background: "var(--surface2)", border: "0.5px solid var(--border)", borderRadius: "var(--radius-sm)", fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.8 }}>
-              <span style={{ color: "var(--gold)" }}>✦ Config:</span>{" "}
-              {domObj?.icon} {domObj?.label} · {lenObj.label} · {depObj.label} · {strObj.label}
-              {lenObj.chunked && <span style={{ color: "var(--accent)", marginLeft: 8 }}>⚡ Chunked ({lenObj.chunks} passes)</span>}
-              <span style={{ color: "var(--groq-green)", marginLeft: 8 }}>● Groq primary</span>
-              <span style={{ color: "var(--gemini-blue)", marginLeft: 8 }}>● Gemini fallback</span>
-            </div>
-
-            <button className="gen-btn" disabled={!canGenerate} onClick={generate}>
-              ✦ Generate {lenObj.label} {depObj.label} on "{topic.slice(0, 50)}{topic.length > 50 ? "…" : ""}"
+        <!-- Step 4: Length -->
+        <div class="field-group">
+          <label class="field-label">
+            <span class="step-num">4</span>
+            Length Category
+          </label>
+          <div class="length-grid" id="lengthGrid">
+            <button class="length-card" data-len="5-liner" data-tokens="100" data-approach="single" onclick="selectLen(this)">
+              <div class="lc-name">5-liner</div>
+              <div class="lc-tokens">~100 tokens · instant</div>
             </button>
+            <button class="length-card" data-len="20-liner" data-tokens="400" data-approach="single" onclick="selectLen(this)">
+              <div class="lc-name">20-liner</div>
+              <div class="lc-tokens">~400 tokens · fast</div>
+            </button>
+            <button class="length-card" data-len="40-liner" data-tokens="800" data-approach="single" onclick="selectLen(this)">
+              <div class="lc-name">40-liner</div>
+              <div class="lc-tokens">~800 tokens</div>
+            </button>
+            <button class="length-card" data-len="100-liner" data-tokens="2000" data-approach="single" onclick="selectLen(this)">
+              <div class="lc-name">100-liner</div>
+              <div class="lc-tokens">~2,000 tokens</div>
+            </button>
+            <button class="length-card" data-len="3-pages" data-tokens="3000" data-approach="2pass" onclick="selectLen(this)">
+              <div class="lc-name">3 Pages</div>
+              <div class="lc-tokens">~3,000 tokens · 2-pass</div>
+            </button>
+            <button class="length-card" data-len="9-pages" data-tokens="9000" data-approach="2pass" onclick="selectLen(this)">
+              <div class="lc-name">9 Pages</div>
+              <div class="lc-tokens">~9,000 tokens · 2-pass</div>
+            </button>
+            <button class="length-card" data-len="20-pages" data-tokens="20000" data-approach="3pass" onclick="selectLen(this)">
+              <div class="lc-name">20 Pages</div>
+              <div class="lc-tokens">~20,000 · 3-pass</div>
+            </button>
+            <button class="length-card" data-len="100-pages" data-tokens="100000" data-approach="chunked" onclick="selectLen(this)">
+              <div class="lc-name">100 Pages</div>
+              <div class="lc-tokens">~100K · chunked</div>
+              <span class="lc-pro">PRO</span>
+            </button>
+          </div>
+        </div>
 
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button className="reset-btn" onClick={() => setStep(1)}>← Back</button>
-            </div>
-          </>
-        )}
+        <!-- Step 5: Research Depth -->
+        <div class="field-group">
+          <label class="field-label">
+            <span class="step-num">5</span>
+            Research Depth
+          </label>
+          <select class="field-select" id="depthSelect" onchange="updateEstimate()">
+            <option value="0.6">Simple Summary (0.6×)</option>
+            <option value="1" selected>Normal Research (1×)</option>
+            <option value="1.5">Deep Research (1.5×)</option>
+            <option value="2">Core Research (2×)</option>
+            <option value="3">Detailed & Explanatory (3×)</option>
+          </select>
+        </div>
 
-        {/* ── STEP 3: OUTPUT ── */}
-        {step === 3 && (
-          <>
-            {generating && (
-              <div className="rf-section">
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>Generating via</span>
-                  <span className={`provider-tag ${activeProvider}`}>
-                    {activeProvider === "groq" ? "⚡ Groq · llama-3.3-70b" : "◈ Gemini · fallback"}
-                  </span>
-                </div>
-                <div className="progress-wrap">
-                  <div className="progress-label">
-                    <span>Generating…</span>
-                    <span>{progress}%</span>
-                  </div>
-                  <div className="progress-track">
-                    <div className="progress-fill" style={{ width: progress + "%" }} />
-                  </div>
-                </div>
-                <div className="phase-log">
-                  {phases.map((p, i) => (
-                    <div key={i} className={
-                      p.type === "ok"       ? "pl-ok" :
-                      p.type === "fallback" ? "pl-fallback" :
-                      p.type === "err"      ? "pl-err" : "pl-run"
-                    }>
-                      {p.type === "ok" ? "✓" : p.type === "fallback" ? "↻" : p.type === "err" ? "✕" : "▸"} {p.msg}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+        <!-- Step 6: Document Structure -->
+        <div class="field-group">
+          <label class="field-label">
+            <span class="step-num">6</span>
+            Include in Document
+          </label>
+          <div class="struct-checks">
+            <span class="struct-chip active" data-struct="cover" onclick="toggleStruct(this)">Cover Page</span>
+            <span class="struct-chip active" data-struct="toc" onclick="toggleStruct(this)">Table of Contents</span>
+            <span class="struct-chip active" data-struct="abstract" onclick="toggleStruct(this)">Abstract</span>
+            <span class="struct-chip active" data-struct="references" onclick="toggleStruct(this)">References</span>
+            <span class="struct-chip" data-struct="about" onclick="toggleStruct(this)">About Section</span>
+            <span class="struct-chip" data-struct="philosophy" onclick="toggleStruct(this)">Philosophy</span>
+          </div>
+        </div>
 
-            {output && (
-              <div className="output-wrap">
-                <div className="output-topbar">
-                  <div>
-                    <div className="title">{domObj?.icon} {topic.slice(0, 60)}</div>
-                    <div className="meta">{lenObj.label} · {depObj.label} · {strObj.label}</div>
-                  </div>
-                  <div className="output-actions">
-                    <button className="out-btn" onClick={copyOutput}>Copy</button>
-                    <button className="out-btn" onClick={downloadOutput}>↓ .txt</button>
-                  </div>
-                </div>
-                <div className="output-content" ref={outputRef}>
-                  {output}
-                  {generating && <span className="cursor-blink" />}
-                </div>
-                <div className="token-meter">
-                  <div className="tm-item">Est. tokens: <span className="tm-val">~{tokenCount.toLocaleString()}</span></div>
-                  <div className="tm-item">Domain: <span className="tm-val">{domObj?.label}</span></div>
-                  <div className="tm-item">Depth: <span className="tm-val">×{depObj.mult}</span></div>
-                  <div className="tm-item">Chunks: <span className="tm-val">{lenObj.chunked ? lenObj.chunks : 1}</span></div>
-                  <div className="tm-item">Provider: <span className={`tm-provider ${activeProvider}`}>{activeProvider === "groq" ? "Groq" : "Gemini"}</span></div>
-                </div>
-              </div>
-            )}
-
-            {error && <div style={{ color: "#f87171", fontFamily: "var(--mono)", fontSize: 11, marginTop: 8 }}>⚠ {error}</div>}
-
-            {!generating && (
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button className="reset-btn" onClick={() => setStep(2)}>← Change Format</button>
-                <button className="reset-btn" onClick={reset}>⟳ New Research</button>
-                {output && <button className="reset-btn" onClick={generate}>↺ Regenerate</button>}
-              </div>
-            )}
-          </>
-        )}
+        <!-- Token estimate -->
+        <div class="token-estimate" id="tokenEstimate">
+          <div>
+            <div class="te-label">Estimated Tokens</div>
+            <div class="te-bar-wrap"><div class="te-bar" id="teBar" style="width:5%"></div></div>
+          </div>
+          <div class="te-value" id="teValue">—</div>
+        </div>
 
       </div>
-    </>
-  );
+
+      <div class="wizard-footer">
+        <button class="gen-btn" id="genBtn" onclick="generateDoc()" disabled>
+          Generate Document <span class="btn-arrow">→</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- RIGHT: OUTPUT -->
+    <main class="output-panel">
+      <div class="output-toolbar">
+        <span class="ot-label" id="docStatusLabel">Ready to generate</span>
+        <div class="ot-progress" id="progressIndicator">
+          <span class="spinner">◌</span>
+          <span id="progressMsg">Generating…</span>
+        </div>
+        <button class="ot-btn" onclick="copyOutput()" id="copyBtn" style="display:none">Copy Text</button>
+        <button class="ot-btn" onclick="downloadOutput()" id="dlBtn" style="display:none">Download .txt</button>
+        <button class="ot-btn" onclick="clearOutput()" id="clearBtn" style="display:none">Clear</button>
+      </div>
+
+      <div class="output-scroll" id="outputScroll">
+        <div class="empty-state" id="emptyState">
+          <div class="empty-icon">📜</div>
+          <div class="empty-title">Your document will appear here</div>
+          <div class="empty-sub">
+            Paste your Anthropic API key above, choose a topic and length category, then click Generate.
+            <br><br>
+            <span style="font-family:'DM Mono',monospace;font-size:11px;color:var(--muted);">
+              Short content → direct API call<br>
+              Medium content → 2-pass chunked<br>
+              Long content → 3-pass hierarchical
+            </span>
+          </div>
+        </div>
+        <div id="docOutput" style="display:none"></div>
+      </div>
+    </main>
+
+  </div>
+</div>
+
+<script>
+/* ══════════════════════════════════════════════
+   STATE
+══════════════════════════════════════════════ */
+let selectedLen = null;
+let selectedApproach = 'single';
+let selectedTokens = 0;
+let activeStructures = new Set(['cover','toc','abstract','references']);
+let generating = false;
+let rawText = '';
+
+/* ══ API KEY ══ */
+function onKeyInput() {
+  const key = document.getElementById('apiKey').value.trim();
+  const dot = document.getElementById('statusDot');
+  const hint = document.getElementById('apiHint');
+  const btn = document.getElementById('genBtn');
+
+  if (key.startsWith('sk-ant-') && key.length > 20) {
+    dot.classList.add('active');
+    hint.textContent = 'Key ready · memory only · not saved';
+    hint.style.color = 'rgba(74,222,128,0.8)';
+  } else if (key.length > 0) {
+    dot.classList.remove('active');
+    hint.textContent = 'Key looks invalid — should start with sk-ant-';
+    hint.style.color = 'rgba(248,113,113,0.8)';
+  } else {
+    dot.classList.remove('active');
+    hint.textContent = 'Key stored in memory only · not saved anywhere';
+    hint.style.color = 'rgba(255,255,255,0.35)';
+  }
+  updateGenBtn();
 }
+
+function toggleKeyVis() {
+  const inp = document.getElementById('apiKey');
+  const btn = document.getElementById('keyToggle');
+  if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'hide'; }
+  else { inp.type = 'password'; btn.textContent = 'show'; }
+}
+
+/* ══ LENGTH SELECTION ══ */
+function selectLen(el) {
+  document.querySelectorAll('.length-card').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  selectedLen = el.dataset.len;
+  selectedApproach = el.dataset.approach;
+  selectedTokens = parseInt(el.dataset.tokens);
+  updateEstimate();
+  updateGenBtn();
+}
+
+/* ══ STRUCT TOGGLE ══ */
+function toggleStruct(el) {
+  const key = el.dataset.struct;
+  if (activeStructures.has(key)) { activeStructures.delete(key); el.classList.remove('active'); }
+  else { activeStructures.add(key); el.classList.add('active'); }
+}
+
+/* ══ TOKEN ESTIMATE ══ */
+function updateEstimate() {
+  if (!selectedLen) { document.getElementById('teValue').textContent = '—'; return; }
+  const depth = parseFloat(document.getElementById('depthSelect').value);
+  const est = Math.round(selectedTokens * depth);
+  document.getElementById('teValue').textContent = est >= 1000 ? (est/1000).toFixed(1) + 'K' : est;
+  const pct = Math.min(100, (est / 300000) * 100);
+  document.getElementById('teBar').style.width = Math.max(3, pct) + '%';
+}
+
+function updateGenBtn() {
+  const key = document.getElementById('apiKey').value.trim();
+  const btn = document.getElementById('genBtn');
+  const hasKey = key.startsWith('sk-ant-') && key.length > 20;
+  const hasTopic = document.getElementById('topicInput').value.trim().length > 2;
+  const hasLen = !!selectedLen;
+  btn.disabled = !hasKey || !hasTopic || !hasLen || generating;
+}
+
+document.getElementById('topicInput').addEventListener('input', updateGenBtn);
+
+/* ══ DOMAIN SYSTEM PROMPTS ══ */
+const DOMAIN_PROMPTS = {
+  'music': `You are a specialist in Indian classical music, Raga science, Nada Brahman, and ethnomusicology. Use technical musical terminology (Shrutis, Swaras, Melakartha, Nakshatra correspondences, Rasa theory, Nada Chikitsa). Include references to classical texts and modern acoustic research.`,
+  'fine-arts': `You are a specialist in fine arts, aesthetics, art history, and visual culture. Draw on both Eastern and Western art traditions, iconography, compositional theory, and cultural philosophy. Use scholarly art criticism vocabulary.`,
+  'philosophy': `You are a specialist in philosophy, particularly Vedanta, Indian philosophy, consciousness studies, and comparative philosophy. Reference primary philosophical texts, Upanishads, and contemporary philosophy of mind where relevant.`,
+  'microbiology': `You are a specialist in microbiology and life sciences. Use precise scientific terminology: include discussion of cellular mechanisms, molecular biology, microbial ecology, and relevant research findings. Follow scientific paper conventions.`,
+  'science': `You are a specialist in physics and interdisciplinary science. Reference established theories, empirical data, and current research frontiers. Use precise scientific language with appropriate equations and terminology where relevant.`,
+  'software': `You are a specialist in software engineering, computer science, and technology. Include technical depth: algorithms, architectural patterns, code concepts, and industry best practices. Write for an educated technical audience.`,
+  'vedic': `You are a specialist in Vedic sciences, Sanskrit, and Indian cultural heritage. Reference the Vedas, Upanishads, Natya Shastra, Yoga Sutras, and allied texts with precision. Bridge ancient wisdom with modern scientific validation.`,
+  'literature': `You are a specialist in world literature, linguistics, and literary criticism. Reference canonical texts, literary theory, and linguistic analysis. Use rich literary vocabulary and intertextual references.`,
+  'history': `You are a specialist in history and archaeology. Provide historically accurate, chronologically structured analysis. Reference primary sources, archaeological evidence, and scholarly debates. Maintain rigorous historical methodology.`,
+  'economics': `You are a specialist in economics and public policy. Use economic theory, data analysis, and policy frameworks. Reference relevant economic literature, empirical studies, and cross-disciplinary perspectives.`,
+  'law': `You are a specialist in jurisprudence and legal theory. Reference relevant legal principles, case law, statutes, and legal scholarship. Maintain precise legal language and structured legal argumentation.`,
+  'medicine': `You are a specialist in medicine and health sciences. Ground all content in clinical evidence, medical research, and established medical knowledge. Use precise medical terminology and follow clinical writing conventions.`,
+  'sacred-geometry': `You are a specialist in sacred geometry, Vedic mathematics, and the mathematical basis of art and architecture. Reference Sulba Sutras, Fibonacci patterns, fractal geometry, and the mathematical principles underlying ancient temple architecture and design.`,
+};
+
+/* ══ DOCUMENT STRUCTURE BUILDER ══ */
+function buildStructureInstructions() {
+  const parts = [];
+  if (activeStructures.has('cover')) parts.push('a cover page section with title, domain, and date');
+  if (activeStructures.has('toc')) parts.push('a Table of Contents');
+  if (activeStructures.has('abstract')) parts.push('an Abstract (150–200 words)');
+  if (activeStructures.has('about')) parts.push('an About the Research section');
+  if (activeStructures.has('philosophy')) parts.push('a Philosophy section explaining the research worldview');
+  if (activeStructures.has('references')) parts.push('a References section with 5–8 scholarly references');
+  return parts.length > 0 ? `Include: ${parts.join(', ')}.` : '';
+}
+
+/* ══ PROMPT BUILDER ══ */
+function buildPrompt(topic, keywords, domain, len, depth, pass, outline) {
+  const domainPrompt = DOMAIN_PROMPTS[domain] || DOMAIN_PROMPTS['science'];
+  const struct = buildStructureInstructions();
+  const kwLine = keywords ? `\nKeywords to incorporate: ${keywords}` : '';
+  const depthLabel = {'0.6':'concise and accessible','1':'balanced and well-researched','1.5':'detailed and analytical','2':'deeply researched with cross-references','3':'comprehensive, exhaustive, and scholarly'}[depth] || 'well-researched';
+
+  // Length instructions
+  const lenMap = {
+    '5-liner': 'Write exactly 5 lines (sentences). Be precise and dense with insight.',
+    '20-liner': 'Write exactly 20 lines. Cover the topic thoroughly in this compact format.',
+    '40-liner': 'Write approximately 40 lines covering all key aspects.',
+    '100-liner': 'Write approximately 100 lines forming a complete short article.',
+    '3-pages': pass === 1 ? 'Generate a detailed section-by-section outline.' : `Using this outline:\n${outline}\n\nWrite the full 3-page document (~750 words).`,
+    '9-pages': pass === 1 ? 'Generate a detailed chapter outline with 6–8 sections.' : `Using this outline:\n${outline}\n\nWrite a full section of the document (~450 words for this chunk).`,
+    '20-pages': pass === 1 ? 'Generate a comprehensive chapter and section outline.' : pass === 2 ? `Expand this outline section into full prose:\n${outline}` : 'Write the final integration section.',
+    '100-pages': pass === 1 ? 'Generate the master outline with chapters, sections, and subsections.' : `Write chapter ${outline} of the 100-page document in full (~2,000 words).`,
+  };
+
+  return `${domainPrompt}
+
+Topic: ${topic}${kwLine}
+Writing style: ${depthLabel}
+${struct}
+
+${lenMap[len] || 'Write a comprehensive research document on this topic.'}
+
+Format the output with clear Markdown headings (##, ###), paragraphs, and lists where appropriate. Write in flowing, scholarly prose. Do not include any preamble — begin the document directly.`;
+}
+
+/* ══ CORE API CALL ══ */
+async function callAPI(prompt, maxTokens) {
+  const key = document.getElementById('apiKey').value.trim();
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: Math.min(maxTokens, 8000),
+      messages: [{ role: 'user', content: prompt }]
+    })
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.content?.[0]?.text || '';
+}
+
+/* ══ GENERATION ORCHESTRATOR ══ */
+async function generateDoc() {
+  if (generating) return;
+  generating = true;
+  updateGenBtn();
+
+  const topic = document.getElementById('topicInput').value.trim();
+  const keywords = document.getElementById('keywordsInput').value.trim();
+  const domain = document.getElementById('domainSelect').value;
+  const depth = document.getElementById('depthSelect').value;
+  const domainLabel = document.getElementById('domainSelect').options[document.getElementById('domainSelect').selectedIndex].text;
+
+  rawText = '';
+
+  // UI: show generating state
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('docOutput').style.display = 'block';
+  document.getElementById('docOutput').innerHTML = '';
+  document.getElementById('progressIndicator').style.display = 'flex';
+  document.getElementById('copyBtn').style.display = 'none';
+  document.getElementById('dlBtn').style.display = 'none';
+  document.getElementById('clearBtn').style.display = 'none';
+
+  setStatus(`Generating ${selectedLen} on "${topic}"…`);
+
+  try {
+    let result = '';
+
+    if (selectedApproach === 'single') {
+      // ── Single pass ──
+      setProgress(`Single pass generation…`);
+      const maxTok = Math.min(Math.round(selectedTokens * parseFloat(depth)), 4000);
+      const prompt = buildPrompt(topic, keywords, domain, selectedLen, depth, 0, null);
+      result = await callAPI(prompt, maxTok);
+
+    } else if (selectedApproach === '2pass') {
+      // ── 2-pass: outline → fill ──
+      setProgress('Pass 1 of 2: Generating outline…');
+      showChunkLog([
+        { label: 'Pass 1 — Outline', state: 'pending' },
+        { label: 'Pass 2 — Full Content', state: 'waiting' }
+      ]);
+      const outlinePrompt = buildPrompt(topic, keywords, domain, selectedLen, depth, 1, null);
+      const outline = await callAPI(outlinePrompt, 800);
+
+      updateChunkLog(0, 'ok');
+      setProgress('Pass 2 of 2: Writing full content…');
+      updateChunkLog(1, 'pending');
+      const fillPrompt = buildPrompt(topic, keywords, domain, selectedLen, depth, 2, outline);
+      const maxTok = Math.min(Math.round(selectedTokens * parseFloat(depth)), 8000);
+      result = await callAPI(fillPrompt, maxTok);
+      updateChunkLog(1, 'ok');
+
+    } else if (selectedApproach === '3pass') {
+      // ── 3-pass: structure → chapters → content ──
+      showChunkLog([
+        { label: 'Pass 1 — Master Outline', state: 'pending' },
+        { label: 'Pass 2 — Chapter Expansion', state: 'waiting' },
+        { label: 'Pass 3 — Final Integration', state: 'waiting' }
+      ]);
+      setProgress('Pass 1 of 3: Generating master outline…');
+      const outline = await callAPI(buildPrompt(topic, keywords, domain, selectedLen, depth, 1, null), 1000);
+      updateChunkLog(0, 'ok');
+
+      setProgress('Pass 2 of 3: Expanding chapters…');
+      updateChunkLog(1, 'pending');
+      const expansion = await callAPI(buildPrompt(topic, keywords, domain, selectedLen, depth, 2, outline), 6000);
+      updateChunkLog(1, 'ok');
+
+      setProgress('Pass 3 of 3: Final integration…');
+      updateChunkLog(2, 'pending');
+      const final = await callAPI(buildPrompt(topic, keywords, domain, selectedLen, depth, 3, expansion), 4000);
+      updateChunkLog(2, 'ok');
+      result = expansion + '\n\n' + final;
+
+    } else if (selectedApproach === 'chunked') {
+      // ── Chunked: outline + 5 chapters ──
+      const numChapters = 5;
+      showChunkLog([
+        { label: 'Master Outline', state: 'pending' },
+        ...Array.from({length: numChapters}, (_, i) => ({ label: `Chapter ${i+1}`, state: 'waiting' }))
+      ]);
+      setProgress('Generating master outline…');
+      const outline = await callAPI(buildPrompt(topic, keywords, domain, selectedLen, depth, 1, null), 1200);
+      updateChunkLog(0, 'ok');
+
+      let chapters = '';
+      for (let i = 0; i < numChapters; i++) {
+        setProgress(`Writing Chapter ${i+1} of ${numChapters}…`);
+        updateChunkLog(i+1, 'pending');
+        const ch = await callAPI(buildPrompt(topic, keywords, domain, selectedLen, depth, 2, `Chapter ${i+1} from outline:\n${outline}`), 4000);
+        chapters += '\n\n' + ch;
+        updateChunkLog(i+1, 'ok');
+      }
+      result = chapters;
+    }
+
+    // ── Render ──
+    rawText = result;
+    renderDocument(result, topic, domainLabel);
+    setStatus(`Document ready — ${selectedLen} · ${domain}`);
+    document.getElementById('progressIndicator').style.display = 'none';
+    document.getElementById('copyBtn').style.display = '';
+    document.getElementById('dlBtn').style.display = '';
+    document.getElementById('clearBtn').style.display = '';
+
+  } catch (e) {
+    document.getElementById('progressIndicator').style.display = 'none';
+    document.getElementById('docOutput').innerHTML = `
+      <div class="error-box">
+        <strong>⚠ Generation Error</strong><br>
+        ${e.message}<br><br>
+        <span style="font-size:12px;opacity:0.8;">Check your API key is valid and has credits. If the error mentions CORS, this can occur in some browsers — try downloading the file and opening it locally.</span>
+      </div>
+    `;
+    setStatus('Error — see details in output panel');
+  }
+
+  generating = false;
+  updateGenBtn();
+}
+
+/* ══ DOCUMENT RENDERER ══ */
+function renderDocument(md, topic, domainLabel) {
+  const date = new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const depth = document.getElementById('depthSelect').options[document.getElementById('depthSelect').selectedIndex].text;
+
+  let html = '';
+
+  // Cover
+  if (activeStructures.has('cover')) {
+    html += `<div class="doc-cover">
+      <span class="doc-domain-tag">${domainLabel}</span>
+      <h1>${escHtml(topic)}</h1>
+      <div class="doc-meta">
+        <span>${selectedLen.replace('-', ' ')}</span>
+        <span>${depth}</span>
+        <span>${date}</span>
+        <span>Research Forge · Cultural Musings</span>
+      </div>
+    </div>`;
+  }
+
+  html += `<div class="doc-body">${markdownToHtml(md)}</div>`;
+  document.getElementById('docOutput').innerHTML = html;
+}
+
+/* ── Minimal Markdown → HTML ── */
+function markdownToHtml(md) {
+  return md
+    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^#### (.+)$/gm, '<h3>$1</h3>')
+    .replace(/^\*\*(.+)\*\*$/gm, '<strong>$1</strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>')
+    .replace(/^- (.+)$/gm, '<li>$1</li>')
+    .replace(/^(\d+)\. (.+)$/gm, '<li>$2</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, m => `<ul>${m}</ul>`)
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/^(?!<[hbup])(.+)$/gm, (line) => line.trim() ? line : '')
+    .replace(/(<\/h[23]>|<\/blockquote>|<\/ul>)\s*<\/p><p>/g, '$1')
+    .replace(/<p><h/g, '<h').replace(/<\/h([23])><\/p>/g, '</h$1>')
+    .replace(/<p><ul>/g, '<ul>').replace(/<\/ul><\/p>/g, '</ul>')
+    .replace(/<p><blockquote>/g, '<blockquote>').replace(/<\/blockquote><\/p>/g, '</blockquote>')
+    .replace(/^/, '<p>').replace(/$/, '</p>');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+/* ══ CHUNK LOG ══ */
+let chunkStates = [];
+function showChunkLog(items) {
+  chunkStates = items.map(i => ({...i}));
+  renderChunkLog();
+}
+function updateChunkLog(idx, state) {
+  if (chunkStates[idx]) { chunkStates[idx].state = state; renderChunkLog(); }
+}
+function renderChunkLog() {
+  const icons = { ok: '✓', pending: '<span class="cl-spin">◌</span>', waiting: '○' };
+  const cls = { ok: 'cl-ok', pending: 'cl-pending', waiting: '' };
+  const html = chunkStates.map(c =>
+    `<div class="cl-line"><span class="${cls[c.state]}">${icons[c.state]}</span> ${c.label}</div>`
+  ).join('');
+  const existing = document.querySelector('.chunk-log');
+  if (existing) { existing.innerHTML = html; return; }
+  const el = document.createElement('div');
+  el.className = 'chunk-log';
+  el.innerHTML = html;
+  document.getElementById('docOutput').prepend(el);
+}
+
+/* ══ UI HELPERS ══ */
+function setStatus(msg) { document.getElementById('docStatusLabel').textContent = msg; }
+function setProgress(msg) { document.getElementById('progressMsg').textContent = msg; }
+
+function copyOutput() {
+  navigator.clipboard.writeText(rawText).then(() => {
+    const btn = document.getElementById('copyBtn');
+    btn.textContent = 'Copied ✓'; setTimeout(() => btn.textContent = 'Copy Text', 2000);
+  });
+}
+
+function downloadOutput() {
+  const topic = document.getElementById('topicInput').value.trim().replace(/\s+/g,'_').slice(0,40);
+  const blob = new Blob([rawText], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `research_${topic}_${selectedLen}.txt`; a.click();
+}
+
+function clearOutput() {
+  rawText = '';
+  document.getElementById('docOutput').style.display = 'none';
+  document.getElementById('emptyState').style.display = 'flex';
+  document.getElementById('copyBtn').style.display = 'none';
+  document.getElementById('dlBtn').style.display = 'none';
+  document.getElementById('clearBtn').style.display = 'none';
+  setStatus('Ready to generate');
+  // Reset length selection
+  document.querySelectorAll('.length-card').forEach(c => c.classList.remove('active'));
+  selectedLen = null; selectedTokens = 0;
+  document.getElementById('teValue').textContent = '—';
+  document.getElementById('teBar').style.width = '3%';
+  updateGenBtn();
+}
+</script>
+</body>
+</html>
