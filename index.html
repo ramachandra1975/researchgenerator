@@ -1,72 +1,130 @@
 import { useState, useRef, useCallback } from "react";
 
-/* ─────────── CONSTANTS ─────────── */
+/* ─────────── API CONFIGURATION ─────────── */
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL    = "llama-3.3-70b-versatile";
+const GROQ_KEY      = "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";
+
+const GEMINI_KEY    = "AIzaSyD7Wax8isGytBCThr10svbi44Ch-MhyyAo";
+const GEMINI_FLASH  = "gemini-1.5-flash";
+const GEMINI_PRO    = "gemini-1.5-pro";
+
+/* ─── Primary: Groq · Fallback: Gemini (silent, automatic) ─── */
+async function callGroq(systemPrompt, userPrompt, maxTokens) {
+  const res = await fetch(GROQ_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${GROQ_KEY}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      max_tokens: Math.min(maxTokens, 8000),
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt   },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
+async function callGemini(systemPrompt, userPrompt, maxTokens, longForm = false) {
+  const model = longForm ? GEMINI_PRO : GEMINI_FLASH;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
+      generationConfig: { maxOutputTokens: Math.min(maxTokens, 8192) },
+    }),
+  });
+  if (!res.ok) throw new Error(`Gemini ${res.status}`);
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+}
+
+/* Smart router: Groq first → Gemini fallback */
+async function callAI(systemPrompt, userPrompt, maxTokens, lengthId = "") {
+  const isLongForm = ["p20", "p100", "p300"].includes(lengthId);
+  try {
+    return await callGroq(systemPrompt, userPrompt, maxTokens);
+  } catch (groqErr) {
+    console.warn("Groq unavailable, switching to Gemini:", groqErr.message);
+    return await callGemini(systemPrompt, userPrompt, maxTokens, isLongForm);
+  }
+}
+
+/* ─────────── DOMAIN CONFIG ─────────── */
 const DOMAINS = [
-  { id: "vedic", label: "Vedic Sciences", icon: "🕉️", color: "#c9a84c" },
-  { id: "music", label: "Music & Ragas", icon: "🎵", color: "#c0607a" },
-  { id: "arts", label: "Fine Arts", icon: "🎨", color: "#7b4ddb" },
-  { id: "philosophy", label: "Philosophy", icon: "⚡", color: "#38c9d4" },
-  { id: "microbiology", label: "Microbiology", icon: "🔬", color: "#2ecc71" },
-  { id: "science", label: "Physics / Science", icon: "⚛️", color: "#e67e22" },
-  { id: "software", label: "Software / CS", icon: "💻", color: "#3498db" },
-  { id: "literature", label: "Literature", icon: "📖", color: "#e74c3c" },
-  { id: "history", label: "History", icon: "🏛️", color: "#95a5a6" },
-  { id: "economics", label: "Economics", icon: "📊", color: "#1abc9c" },
-  { id: "medicine", label: "Medicine", icon: "⚕️", color: "#ff6b6b" },
-  { id: "culture", label: "Cultural Studies", icon: "🌏", color: "#f39c12" },
+  { id: "vedic",       label: "Vedic Sciences",    icon: "🕉️",  color: "#c9a84c" },
+  { id: "music",       label: "Music & Ragas",     icon: "🎵",  color: "#c0607a" },
+  { id: "arts",        label: "Fine Arts",          icon: "🎨",  color: "#7b4ddb" },
+  { id: "philosophy",  label: "Philosophy",         icon: "⚡",  color: "#38c9d4" },
+  { id: "microbiology",label: "Microbiology",       icon: "🔬",  color: "#2ecc71" },
+  { id: "science",     label: "Physics / Science",  icon: "⚛️",  color: "#e67e22" },
+  { id: "software",    label: "Software / CS",      icon: "💻",  color: "#3498db" },
+  { id: "literature",  label: "Literature",         icon: "📖",  color: "#e74c3c" },
+  { id: "history",     label: "History",            icon: "🏛️",  color: "#95a5a6" },
+  { id: "economics",   label: "Economics",          icon: "📊",  color: "#1abc9c" },
+  { id: "medicine",    label: "Medicine",           icon: "⚕️",  color: "#ff6b6b" },
+  { id: "culture",     label: "Cultural Studies",   icon: "🌏",  color: "#f39c12" },
 ];
 
 const LENGTH_CATS = [
-  { id: "l5",   label: "5-liner",    desc: "~100 tokens",   pages: "Quick fact",    icon: "·",   maxTok: 150 },
-  { id: "l20",  label: "20-liner",   desc: "~400 tokens",   pages: "Summary",       icon: "··",  maxTok: 500 },
-  { id: "l40",  label: "40-liner",   desc: "~800 tokens",   pages: "Introduction",  icon: "···", maxTok: 900 },
-  { id: "l50",  label: "50-liner",   desc: "~1,000 tokens", pages: "Short article", icon: "····",maxTok: 1100 },
-  { id: "l100", label: "100-liner",  desc: "~2,000 tokens", pages: "Full article",  icon: "▪",   maxTok: 2200 },
-  { id: "p3",   label: "3 Pages",    desc: "~3,000 tokens", pages: "Report",        icon: "▪▪",  maxTok: 3200 },
-  { id: "p9",   label: "9 Pages",    desc: "~9,000 tokens", pages: "Deep dive",     icon: "▪▪▪", maxTok: 3000, chunked: true, chunks: 3 },
-  { id: "p20",  label: "20 Pages",   desc: "~20k tokens",   pages: "Research paper",icon: "■",   maxTok: 3000, chunked: true, chunks: 7 },
-  { id: "p100", label: "100 Pages",  desc: "~100k tokens",  pages: "Full study",    icon: "■■",  maxTok: 3000, chunked: true, chunks: 15, badge: "Pro" },
-  { id: "p300", label: "300 Pages",  desc: "~300k tokens",  pages: "Book-length",   icon: "■■■", maxTok: 3000, chunked: true, chunks: 30, badge: "Pro" },
+  { id: "l5",   label: "5-liner",   desc: "~100 tokens",   pages: "Quick fact",     maxTok: 150,  chunked: false, chunks: 1 },
+  { id: "l20",  label: "20-liner",  desc: "~400 tokens",   pages: "Summary",        maxTok: 500,  chunked: false, chunks: 1 },
+  { id: "l40",  label: "40-liner",  desc: "~800 tokens",   pages: "Introduction",   maxTok: 900,  chunked: false, chunks: 1 },
+  { id: "l50",  label: "50-liner",  desc: "~1k tokens",    pages: "Short article",  maxTok: 1100, chunked: false, chunks: 1 },
+  { id: "l100", label: "100-liner", desc: "~2k tokens",    pages: "Full article",   maxTok: 2200, chunked: false, chunks: 1 },
+  { id: "p3",   label: "3 Pages",   desc: "~3k tokens",    pages: "Report",         maxTok: 3200, chunked: false, chunks: 1 },
+  { id: "p9",   label: "9 Pages",   desc: "~9k tokens",    pages: "Deep dive",      maxTok: 3000, chunked: true,  chunks: 3 },
+  { id: "p20",  label: "20 Pages",  desc: "~20k tokens",   pages: "Research paper", maxTok: 3000, chunked: true,  chunks: 7 },
+  { id: "p100", label: "100 Pages", desc: "~100k tokens",  pages: "Full study",     maxTok: 3000, chunked: true,  chunks: 15, badge: "Pro" },
+  { id: "p300", label: "300 Pages", desc: "~300k tokens",  pages: "Book-length",    maxTok: 3000, chunked: true,  chunks: 30, badge: "Pro" },
 ];
 
 const DEPTHS = [
-  { id: "simple",      label: "Simple Summary",    mult: 0.6, icon: "○",  desc: "Plain language, key takeaways" },
-  { id: "normal",      label: "Normal Research",   mult: 1.0, icon: "◐",  desc: "Balanced, citations suggested" },
-  { id: "deep",        label: "Deep Research",     mult: 1.5, icon: "●",  desc: "Analysis, cross-references" },
-  { id: "core",        label: "Core Research",     mult: 2.0, icon: "◉",  desc: "Primary sources, methodology" },
-  { id: "detailed",    label: "Detailed Study",    mult: 3.0, icon: "✦",  desc: "Full academic treatment" },
+  { id: "simple",   label: "Simple Summary",   mult: 0.6, icon: "○",  desc: "Plain language, key takeaways" },
+  { id: "normal",   label: "Normal Research",  mult: 1.0, icon: "◐",  desc: "Balanced, citations suggested" },
+  { id: "deep",     label: "Deep Research",    mult: 1.5, icon: "●",  desc: "Analysis, cross-references" },
+  { id: "core",     label: "Core Research",    mult: 2.0, icon: "◉",  desc: "Primary sources, methodology" },
+  { id: "detailed", label: "Detailed Study",   mult: 3.0, icon: "✦",  desc: "Full academic treatment" },
 ];
 
 const STRUCTURES = [
-  { id: "article",   label: "Article",          parts: ["Introduction","Body","Conclusion"] },
-  { id: "report",    label: "Formal Report",    parts: ["Abstract","Introduction","Methodology","Findings","Conclusion","References"] },
-  { id: "essay",     label: "Essay",            parts: ["Introduction","Main Arguments","Counter-Analysis","Conclusion"] },
-  { id: "summary",   label: "Executive Summary",parts: ["Overview","Key Points","Implications"] },
-  { id: "tutorial",  label: "Tutorial / Guide", parts: ["Introduction","Prerequisites","Step-by-Step","Examples","Summary"] },
-  { id: "review",    label: "Literature Review", parts: ["Background","Themes","Analysis","Gaps","Future Directions"] },
+  { id: "article",  label: "Article",           parts: ["Introduction","Body","Conclusion"] },
+  { id: "report",   label: "Formal Report",     parts: ["Abstract","Introduction","Methodology","Findings","Conclusion","References"] },
+  { id: "essay",    label: "Essay",             parts: ["Introduction","Main Arguments","Counter-Analysis","Conclusion"] },
+  { id: "summary",  label: "Executive Summary", parts: ["Overview","Key Points","Implications"] },
+  { id: "tutorial", label: "Tutorial / Guide",  parts: ["Introduction","Prerequisites","Step-by-Step","Examples","Summary"] },
+  { id: "review",   label: "Literature Review", parts: ["Background","Themes","Analysis","Gaps","Future Directions"] },
 ];
 
 /* ─────────── DOMAIN SYSTEM PROMPTS ─────────── */
-function domainSystemPrompt(domainId, structureId, depthId) {
+function domainSystemPrompt(domainId, depthId) {
   const tones = {
-    vedic: "You are a Vedic scholar versed in Sanskrit texts, Natya Shastra, 108 Karanas, Nada science, and classical Indian philosophy. Use precise Sanskrit terminology with transliterations. Structure content referencing primary texts.",
-    music: "You are a musicologist and ethnomusicologist specializing in Indian classical and world music traditions. Use technical musical terminology, cite ragas, talas, and compositional forms accurately.",
-    arts: "You are an art historian and critic with expertise spanning classical to contemporary. Analyze works with formal, contextual, and aesthetic rigor.",
-    philosophy: "You are a philosopher fluent across Western analytic, Continental, Eastern, and Indigenous traditions. Engage arguments precisely; cite thinkers and texts.",
-    microbiology: "You are a microbiologist and cell biologist. Use precise scientific nomenclature, cite mechanisms, pathways, and peer-reviewed findings accurately.",
-    science: "You are a physicist and scientist. Use correct mathematical and scientific language, cite foundational and cutting-edge research.",
-    software: "You are a senior software engineer and computer scientist. Provide technically precise, implementable explanations with code examples where useful.",
-    literature: "You are a literary scholar and critic. Analyze texts with close-reading rigor, historical context, and theoretical frameworks.",
-    history: "You are a historian with archival and comparative expertise. Contextualize events, cite primary and secondary sources.",
-    economics: "You are an economist fluent in micro, macro, and behavioral economics. Use precise economic terminology and cite empirical evidence.",
-    medicine: "You are a medical researcher and clinician. Use precise clinical and biochemical language, cite evidence-based guidelines.",
-    culture: "You are a cultural studies scholar and anthropologist. Analyze cultural phenomena through multiple theoretical lenses.",
+    vedic:        "You are a Vedic scholar versed in Sanskrit texts, Natya Shastra, 108 Karanas, Nada science, and classical Indian philosophy. Use precise Sanskrit terminology with transliterations.",
+    music:        "You are a musicologist specializing in Indian classical and world music. Use technical musical terminology, cite ragas, talas, and compositional forms accurately.",
+    arts:         "You are an art historian and critic with expertise spanning classical to contemporary. Analyze works with formal, contextual, and aesthetic rigor.",
+    philosophy:   "You are a philosopher fluent across Western analytic, Continental, Eastern, and Indigenous traditions. Engage arguments precisely and cite thinkers.",
+    microbiology: "You are a microbiologist and cell biologist. Use precise scientific nomenclature, cite mechanisms, pathways, and peer-reviewed findings.",
+    science:      "You are a physicist and scientist. Use correct mathematical and scientific language, cite foundational and cutting-edge research.",
+    software:     "You are a senior software engineer. Provide technically precise, implementable explanations with code examples where useful.",
+    literature:   "You are a literary scholar and critic. Analyze texts with close-reading rigor and historical context.",
+    history:      "You are a historian with archival expertise. Contextualize events and cite primary and secondary sources.",
+    economics:    "You are an economist fluent in micro, macro, and behavioral economics. Use precise economic terminology and cite empirical evidence.",
+    medicine:     "You are a medical researcher and clinician. Use precise clinical and biochemical language, cite evidence-based guidelines.",
+    culture:      "You are a cultural studies scholar. Analyze cultural phenomena through multiple theoretical lenses.",
   };
   const depthInstructions = {
-    simple: "Write for a general audience. Avoid jargon. Focus on clarity and accessibility.",
-    normal: "Write for an educated non-specialist. Balance depth with readability. Suggest key references.",
-    deep: "Write for specialists. Include analysis, cross-domain connections, and annotated references.",
-    core: "Write with full academic rigor. Engage primary sources, methodology, epistemological considerations.",
+    simple:   "Write for a general audience. Avoid jargon. Focus on clarity and accessibility.",
+    normal:   "Write for an educated non-specialist. Balance depth with readability. Suggest key references.",
+    deep:     "Write for specialists. Include analysis, cross-domain connections, and annotated references.",
+    core:     "Write with full academic rigor. Engage primary sources, methodology, epistemological considerations.",
     detailed: "Produce comprehensive, scholarly, book-quality treatment. Cover all sub-dimensions exhaustively.",
   };
   return `${tones[domainId] || tones.science} ${depthInstructions[depthId] || depthInstructions.normal} Output well-structured, original content. Do not use placeholder text.`;
@@ -81,35 +139,33 @@ function buildPrompt(topic, keywords, domain, length, depth, structure, chunkInd
 
   const targetLines = {
     l5: 5, l20: 20, l40: 40, l50: 50, l100: 100,
-    p3: 120, p9: 360, p20: 800, p100: 4000, p300: 12000
+    p3: 120, p9: 360, p20: 800, p100: 4000, p300: 12000,
   }[length] || 50;
 
   const linesPerChunk = Math.ceil(targetLines / totalChunks);
 
   if (totalChunks > 1 && chunkIndex === 0) {
-    // Outline pass
-    return `Create a detailed outline for a ${lenObj.label} ${depObj.label} on the following topic in the domain of ${domObj.label}.
+    return `Create a detailed outline for a ${lenObj.label} ${depObj.label} on:
 
 Topic: ${topic}
-Keywords: ${keywords || "none specified"}
-Structure type: ${strObj.label} — sections: ${strObj.parts.join(", ")}
+Domain: ${domObj.label}
+Keywords: ${keywords || "none"}
+Structure: ${strObj.label} — sections: ${strObj.parts.join(", ")}
 
-Output ONLY the outline as a numbered list of sections with 3-5 bullet sub-points each. Be specific to the topic. No prose.`;
+Output ONLY the outline as a numbered list with 3-5 bullet sub-points each. Be specific. No prose.`;
   }
 
   if (totalChunks > 1 && chunkIndex > 0) {
-    const sectionIndex = chunkIndex - 1;
-    const section = strObj.parts[sectionIndex % strObj.parts.length];
-    return `You are writing section "${section}" of a ${lenObj.label} ${depObj.label} on: "${topic}"
+    const section = strObj.parts[(chunkIndex - 1) % strObj.parts.length];
+    return `Writing section "${section}" of a ${lenObj.label} ${depObj.label} on: "${topic}"
 
 Working outline:
 ${outline}
 
-Write ONLY the "${section}" section now. Target approximately ${linesPerChunk} lines. ${depObj.desc}. Do not repeat content from other sections. Begin directly — no preamble.`;
+Write ONLY the "${section}" section. Target ~${linesPerChunk} lines. ${depObj.desc}. Begin directly — no preamble.`;
   }
 
-  // Single-pass
-  return `Write a ${lenObj.pages} (approximately ${linesPerChunk} lines) about the following topic.
+  return `Write a ${lenObj.pages} (approximately ${linesPerChunk} lines) on the following topic.
 
 Domain: ${domObj.label}
 Topic: ${topic}
@@ -117,24 +173,7 @@ Keywords: ${keywords || "none"}
 Structure: ${strObj.parts.join(" → ")}
 Depth: ${depObj.desc}
 
-Begin with the Introduction. Use clear section headers. Write approximately ${linesPerChunk} lines total. ${depObj.desc}.`;
-}
-
-/* ─────────── API CALL ─────────── */
-async function callAPI(systemPrompt, userPrompt, maxTokens) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: Math.min(maxTokens, 1000),
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-    }),
-  });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  const data = await res.json();
-  return data.content?.find(b => b.type === "text")?.text || "";
+Begin with the Introduction. Use clear section headers. Write ~${linesPerChunk} lines total.`;
 }
 
 /* ─────────── STYLES ─────────── */
@@ -156,6 +195,8 @@ const css = `
     --gold: #c9a84c;
     --gold2: #e8cc7a;
     --accent: #7b4ddb;
+    --groq-green: #4ade80;
+    --gemini-blue: #60a5fa;
     --radius: 12px;
     --radius-sm: 7px;
     --mono: 'JetBrains Mono', monospace;
@@ -167,14 +208,21 @@ const css = `
 
   .rf-wrap { max-width: 1080px; margin: 0 auto; padding: 2rem 1.5rem 5rem; }
 
-  /* HEADER */
   .rf-header { text-align: center; padding: 3rem 1rem 2rem; border-bottom: 0.5px solid var(--border); margin-bottom: 2.5rem; }
   .rf-header .badge { display: inline-block; font-family: var(--mono); font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: var(--gold); border: 0.5px solid rgba(201,168,76,0.3); padding: 4px 12px; border-radius: 20px; margin-bottom: 1.2rem; }
   .rf-header h1 { font-family: var(--serif); font-size: clamp(2rem, 5vw, 3.2rem); font-weight: 700; line-height: 1.1; margin-bottom: 0.6rem; }
   .rf-header h1 em { font-style: italic; color: var(--gold); }
   .rf-header p { font-size: 14px; color: var(--text2); max-width: 540px; margin: 0 auto; line-height: 1.7; }
 
-  /* STEPS */
+  /* API status bar */
+  .api-bar { display: flex; align-items: center; justify-content: center; gap: 16px; margin: 1rem 0 2rem; flex-wrap: wrap; }
+  .api-pill { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10px; padding: 4px 10px; border-radius: 20px; border: 0.5px solid; letter-spacing: 0.04em; }
+  .api-pill.groq { border-color: rgba(74,222,128,0.4); color: var(--groq-green); background: rgba(74,222,128,0.08); }
+  .api-pill.gemini { border-color: rgba(96,165,250,0.4); color: var(--gemini-blue); background: rgba(96,165,250,0.08); }
+  .api-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 2s infinite; }
+  .api-pill.gemini .dot { animation: none; opacity: 0.5; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
   .step-indicator { display: flex; align-items: center; gap: 0; margin-bottom: 2rem; overflow-x: auto; padding-bottom: 4px; }
   .step-dot { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 1px; color: var(--text3); white-space: nowrap; }
   .step-dot.active { color: var(--gold); }
@@ -184,12 +232,10 @@ const css = `
   .step-dot.done .num { background: var(--text3); border-color: var(--text3); color: var(--bg); }
   .step-line { flex: 1; height: 0.5px; background: var(--border); min-width: 20px; }
 
-  /* SECTIONS */
   .rf-section { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); padding: 1.6rem; margin-bottom: 1.2rem; }
   .rf-section h3 { font-family: var(--serif); font-size: 1.1rem; color: var(--text); margin-bottom: 0.4rem; }
   .rf-section .hint { font-size: 11px; color: var(--text3); font-family: var(--mono); margin-bottom: 1.2rem; }
 
-  /* DOMAIN GRID */
   .domain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
   .domain-card { padding: 10px 12px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.15s; background: var(--surface2); display: flex; align-items: center; gap: 10px; }
   .domain-card:hover { border-color: var(--border2); background: var(--surface3); }
@@ -198,19 +244,16 @@ const css = `
   .domain-card .name { font-size: 12px; font-weight: 500; color: var(--text2); line-height: 1.3; }
   .domain-card.selected .name { color: var(--gold); }
 
-  /* LENGTH GRID */
   .length-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
   .length-card { padding: 12px 14px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; transition: all 0.15s; background: var(--surface2); position: relative; }
   .length-card:hover { border-color: var(--border2); }
   .length-card.selected { border-color: var(--gold); background: rgba(201,168,76,0.06); }
-  .length-card .lc-icon { font-family: var(--mono); font-size: 10px; color: var(--text3); margin-bottom: 6px; }
   .length-card .lc-label { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 2px; }
   .length-card.selected .lc-label { color: var(--gold); }
   .length-card .lc-desc { font-family: var(--mono); font-size: 10px; color: var(--text3); }
   .length-card .lc-pages { font-size: 11px; color: var(--text2); margin-top: 4px; }
   .pro-badge { position: absolute; top: 8px; right: 8px; background: rgba(123,77,219,0.2); border: 0.5px solid rgba(123,77,219,0.4); color: #b388ff; font-family: var(--mono); font-size: 9px; padding: 1px 5px; border-radius: 3px; }
 
-  /* DEPTH */
   .depth-row { display: flex; flex-direction: column; gap: 6px; }
   .depth-btn { display: flex; align-items: center; gap: 14px; padding: 10px 14px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--surface2); transition: all 0.15s; }
   .depth-btn:hover { border-color: var(--border2); }
@@ -221,7 +264,6 @@ const css = `
   .depth-btn.selected .dl { color: var(--text); }
   .depth-btn .dd { font-size: 11px; color: var(--text3); }
 
-  /* STRUCTURE */
   .struct-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; }
   .struct-card { padding: 10px 12px; border: 0.5px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; background: var(--surface2); transition: all 0.15s; }
   .struct-card:hover { border-color: var(--border2); }
@@ -230,19 +272,21 @@ const css = `
   .struct-card.selected .sc-label { color: #b388ff; }
   .struct-card .sc-parts { font-size: 10px; color: var(--text3); font-family: var(--mono); line-height: 1.6; }
 
-  /* INPUTS */
   .rf-input { width: 100%; background: var(--surface2); border: 0.5px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; color: var(--text); font-family: var(--sans); font-size: 14px; outline: none; transition: border-color 0.15s; }
   .rf-input:focus { border-color: var(--gold); }
   .rf-input::placeholder { color: var(--text3); }
   .input-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
   .input-label { font-family: var(--mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text3); display: block; margin-bottom: 5px; }
 
-  /* GENERATE BTN */
   .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius); border: 0.5px solid rgba(201,168,76,0.4); background: linear-gradient(135deg, rgba(201,168,76,0.12), rgba(201,168,76,0.06)); color: var(--gold2); font-family: var(--serif); font-size: 16px; font-style: italic; cursor: pointer; transition: all 0.2s; margin-top: 1rem; letter-spacing: 0.02em; }
   .gen-btn:hover:not(:disabled) { background: rgba(201,168,76,0.16); border-color: var(--gold); }
   .gen-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  /* PROGRESS */
+  /* provider tag shown during generation */
+  .provider-tag { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 10px; padding: 2px 8px; border-radius: 3px; margin-left: 8px; vertical-align: middle; }
+  .provider-tag.groq { background: rgba(74,222,128,0.1); border: 0.5px solid rgba(74,222,128,0.3); color: var(--groq-green); }
+  .provider-tag.gemini { background: rgba(96,165,250,0.1); border: 0.5px solid rgba(96,165,250,0.3); color: var(--gemini-blue); }
+
   .progress-wrap { margin: 1rem 0; }
   .progress-label { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; color: var(--text3); margin-bottom: 6px; }
   .progress-track { height: 3px; background: var(--surface3); border-radius: 2px; overflow: hidden; }
@@ -250,8 +294,8 @@ const css = `
   .phase-log { font-family: var(--mono); font-size: 10px; color: var(--text3); margin-top: 8px; line-height: 1.8; max-height: 80px; overflow-y: auto; }
   .phase-log .pl-ok { color: #4ade80; }
   .phase-log .pl-run { color: var(--gold); }
+  .phase-log .pl-fallback { color: var(--gemini-blue); }
 
-  /* OUTPUT */
   .output-wrap { background: var(--surface); border: 0.5px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 1.5rem; }
   .output-topbar { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 0.5px solid var(--border); background: var(--surface2); }
   .output-topbar .title { font-family: var(--serif); font-size: 14px; font-style: italic; color: var(--text); }
@@ -265,27 +309,17 @@ const css = `
   .output-content h2 { font-size: 1.2rem; margin: 1.2rem 0 0.6rem; color: var(--gold2); }
   .output-content h3 { font-size: 1rem; margin: 1rem 0 0.4rem; color: var(--text); }
   .output-content p { margin-bottom: 0.8rem; }
-  .output-content strong { color: var(--text); }
-  .output-content em { color: var(--gold); font-style: italic; }
-  .output-streamer { color: var(--text2); }
   .cursor-blink { display: inline-block; width: 8px; height: 14px; background: var(--gold); animation: blink 0.8s step-end infinite; vertical-align: middle; margin-left: 2px; }
   @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 
-  /* TOKEN METER */
   .token-meter { display: flex; gap: 12px; padding: 8px 16px; border-top: 0.5px solid var(--border); font-family: var(--mono); font-size: 10px; color: var(--text3); flex-wrap: wrap; }
   .tm-item { display: flex; gap: 5px; align-items: center; }
   .tm-val { color: var(--gold); }
+  .tm-provider { color: var(--groq-green); }
+  .tm-provider.gemini { color: var(--gemini-blue); }
 
-  /* RESET */
   .reset-btn { display: flex; align-items: center; gap: 6px; background: none; border: 0.5px solid var(--border); border-radius: 6px; color: var(--text3); font-family: var(--mono); font-size: 10px; padding: 5px 12px; cursor: pointer; transition: all 0.15s; margin-top: 1rem; }
   .reset-btn:hover { color: var(--text); border-color: var(--border2); }
-
-  /* SECTION TOGGLE */
-  .section-toggle { display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
-  .toggle-arrow { font-size: 10px; color: var(--text3); transition: transform 0.2s; }
-  .toggle-arrow.open { transform: rotate(180deg); }
-  .section-body { overflow: hidden; }
-  .section-body.collapsed { display: none; }
 
   @media (max-width: 600px) {
     .input-row { grid-template-columns: 1fr; }
@@ -296,24 +330,25 @@ const css = `
 
 /* ─────────── COMPONENT ─────────── */
 export default function ResearchForge() {
-  const [step, setStep] = useState(1);
-  const [domain, setDomain] = useState("");
-  const [length, setLength] = useState("l20");
-  const [depth, setDepth] = useState("normal");
+  const [step, setStep]           = useState(1);
+  const [domain, setDomain]       = useState("");
+  const [length, setLength]       = useState("l20");
+  const [depth, setDepth]         = useState("normal");
   const [structure, setStructure] = useState("article");
-  const [topic, setTopic] = useState("");
-  const [keywords, setKeywords] = useState("");
+  const [topic, setTopic]         = useState("");
+  const [keywords, setKeywords]   = useState("");
   const [generating, setGenerating] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [phases, setPhases] = useState([]);
-  const [output, setOutput] = useState("");
+  const [progress, setProgress]   = useState(0);
+  const [phases, setPhases]       = useState([]);
+  const [output, setOutput]       = useState("");
   const [tokenCount, setTokenCount] = useState(0);
-  const [error, setError] = useState("");
+  const [activeProvider, setActiveProvider] = useState("groq"); // "groq" | "gemini"
+  const [error, setError]         = useState("");
   const outputRef = useRef(null);
 
   const lenObj = LENGTH_CATS.find(l => l.id === length) || LENGTH_CATS[1];
-  const depObj = DEPTHS.find(d => d.id === depth) || DEPTHS[1];
-  const strObj = STRUCTURES.find(s => s.id === structure) || STRUCTURES[0];
+  const depObj = DEPTHS.find(d => d.id === depth)       || DEPTHS[1];
+  const strObj = STRUCTURES.find(s => s.id === structure)|| STRUCTURES[0];
   const domObj = DOMAINS.find(d => d.id === domain);
 
   const addPhase = (msg, type = "run") => setPhases(p => [...p, { msg, type }]);
@@ -326,13 +361,31 @@ export default function ResearchForge() {
     setProgress(0);
     setPhases([]);
     setTokenCount(0);
+    setActiveProvider("groq");
     setStep(3);
 
-    const sysPrompt = domainSystemPrompt(domain, structure, depth);
+    const sysPrompt   = domainSystemPrompt(domain, depth);
     const totalChunks = lenObj.chunked ? Math.min(lenObj.chunks, strObj.parts.length + 1) : 1;
-    let finalOutput = "";
-    let outline = "";
-    let tokensUsed = 0;
+    let finalOutput   = "";
+    let outline       = "";
+    let tokensUsed    = 0;
+    let usedProvider  = "groq";
+
+    /* Wrapper that tracks which provider was used */
+    const smartCall = async (sys, user, maxTok) => {
+      try {
+        const text = await callGroq(sys, user, maxTok);
+        setActiveProvider("groq");
+        usedProvider = "groq";
+        return text;
+      } catch {
+        addPhase("Groq busy → switching to Gemini…", "fallback");
+        setActiveProvider("gemini");
+        usedProvider = "gemini";
+        const isLong = ["p20","p100","p300"].includes(length);
+        return await callGemini(sys, user, maxTok, isLong);
+      }
+    };
 
     try {
       for (let i = 0; i < totalChunks; i++) {
@@ -340,23 +393,23 @@ export default function ResearchForge() {
         setProgress(pct);
 
         let phaseLabel;
-        if (totalChunks === 1) phaseLabel = "Generating content…";
-        else if (i === 0) phaseLabel = "Building outline…";
-        else phaseLabel = `Writing: ${strObj.parts[(i - 1) % strObj.parts.length]}`;
+        if (totalChunks === 1)  phaseLabel = "Generating content…";
+        else if (i === 0)       phaseLabel = "Building outline…";
+        else                    phaseLabel = `Writing: ${strObj.parts[(i - 1) % strObj.parts.length]}`;
 
         addPhase(phaseLabel, "run");
 
         const userPrompt = buildPrompt(topic, keywords, domain, length, depth, structure, i, totalChunks, outline);
-        const maxTok = Math.round(lenObj.maxTok * depObj.mult);
-        const text = await callAPI(sysPrompt, userPrompt, Math.min(maxTok, 1000));
+        const maxTok     = Math.round(lenObj.maxTok * depObj.mult);
+        const text       = await smartCall(sysPrompt, userPrompt, Math.min(maxTok, 8000));
 
         tokensUsed += text.split(/\s+/).length * 1.3;
         setTokenCount(Math.round(tokensUsed));
 
         if (i === 0 && totalChunks > 1) {
-          outline = text;
+          outline      = text;
+          finalOutput  = `## Outline\n\n${text}\n\n---\n\n`;
           addPhase("Outline ready ✓", "ok");
-          finalOutput = `## Outline\n\n${text}\n\n---\n\n`;
         } else {
           finalOutput += text + "\n\n";
           addPhase(`${strObj.parts[(i - 1) % strObj.parts.length]} ✓`, "ok");
@@ -367,7 +420,7 @@ export default function ResearchForge() {
         setProgress(Math.round(((i + 1) / totalChunks) * 100));
       }
       setProgress(100);
-      addPhase("Complete ✓", "ok");
+      addPhase(`Complete ✓  [${usedProvider === "groq" ? "Groq · llama-3.3-70b" : "Gemini · fallback"}]`, "ok");
     } catch (e) {
       setError("Generation error: " + e.message);
       addPhase("Error: " + e.message, "err");
@@ -376,13 +429,15 @@ export default function ResearchForge() {
     }
   }, [domain, topic, keywords, length, depth, structure, lenObj, depObj, strObj]);
 
-  const copyOutput = () => { navigator.clipboard.writeText(output).catch(() => {}); };
+  const copyOutput    = () => { navigator.clipboard.writeText(output).catch(() => {}); };
   const downloadOutput = () => {
     const blob = new Blob([output], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `${topic.slice(0, 40).replace(/\s+/g, "_")}.txt`;
-    a.click(); URL.revokeObjectURL(url);
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement("a");
+    a.href     = url;
+    a.download = `${topic.slice(0, 40).replace(/\s+/g, "_")}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
   const reset = () => { setStep(1); setOutput(""); setPhases([]); setProgress(0); setError(""); setTopic(""); setKeywords(""); setDomain(""); };
 
@@ -397,32 +452,45 @@ export default function ResearchForge() {
         <div className="rf-header">
           <div className="badge">✦ Research Forge · culturalmusings.com</div>
           <h1>Topic-Specific <em>Research Generator</em></h1>
-          <p>From 5-liners to 300-page studies — domain-aware, depth-calibrated, API-powered content for researchers, students & freelancers.</p>
+          <p>From 5-liners to 300-page studies — domain-aware, depth-calibrated content for researchers, students & freelancers.</p>
+        </div>
+
+        {/* API STATUS BAR */}
+        <div className="api-bar">
+          <div className="api-pill groq">
+            <span className="dot"></span>
+            Groq · llama-3.3-70b · primary
+          </div>
+          <div className="api-pill gemini">
+            <span className="dot"></span>
+            Gemini 1.5 · auto-fallback
+          </div>
         </div>
 
         {/* STEP INDICATOR */}
         <div className="step-indicator">
           {["Domain & Topic", "Format & Depth", "Generate"].map((s, i) => (
             <>
-              <div className={`step-dot ${step === i+1 ? "active" : step > i+1 ? "done" : ""}`}>
-                <div className="num">{step > i+1 ? "✓" : i+1}</div>
+              <div key={i} className={`step-dot ${step === i + 1 ? "active" : step > i + 1 ? "done" : ""}`}>
+                <div className="num">{step > i + 1 ? "✓" : i + 1}</div>
                 {s}
               </div>
-              {i < 2 && <div className="step-line" />}
+              {i < 2 && <div className="step-line" key={`line-${i}`} />}
             </>
           ))}
         </div>
 
-        {/* STEP 1: DOMAIN + TOPIC */}
+        {/* ── STEP 1: DOMAIN + TOPIC ── */}
         {step <= 2 && (
           <>
-            {/* DOMAIN */}
             <div className="rf-section">
-              <h3>1. Select Your Domain</h3>
-              <div className="hint">// Pick the field — prompts and tone are tuned per domain</div>
+              <h3>1. Select your domain</h3>
+              <div className="hint">// Prompts and tone are calibrated per domain</div>
               <div className="domain-grid">
                 {DOMAINS.map(d => (
-                  <div key={d.id} className={`domain-card ${domain === d.id ? "selected" : ""}`} onClick={() => setDomain(d.id)}>
+                  <div key={d.id}
+                    className={`domain-card ${domain === d.id ? "selected" : ""}`}
+                    onClick={() => setDomain(d.id)}>
                     <span className="icon">{d.icon}</span>
                     <span className="name">{d.label}</span>
                   </div>
@@ -430,22 +498,41 @@ export default function ResearchForge() {
               </div>
             </div>
 
-            {/* TOPIC */}
             <div className="rf-section">
-              <h3>2. Your Topic</h3>
-              <div className="hint">// Be specific — the more precise, the better the output</div>
+              <h3>2. Your topic</h3>
+              <div className="hint">// Be specific — the more precise, the richer the output</div>
               <div className="input-row">
                 <div>
                   <label className="input-label">Topic / Subject *</label>
-                  <input className="rf-input" placeholder={domain === "vedic" ? "e.g. The 108 Karanas and Nakshatra correspondences" : domain === "music" ? "e.g. Raga Bhairavi — therapeutic applications" : "Enter your research topic…"} value={topic} onChange={e => setTopic(e.target.value)} />
+                  <input
+                    className="rf-input"
+                    placeholder={
+                      domain === "vedic"  ? "e.g. The 108 Karanas and Nakshatra correspondences" :
+                      domain === "music"  ? "e.g. Raga Bhairavi — therapeutic applications" :
+                      "Enter your research topic…"
+                    }
+                    value={topic}
+                    onChange={e => setTopic(e.target.value)}
+                  />
                 </div>
                 <div>
                   <label className="input-label">Keywords (optional)</label>
-                  <input className="rf-input" placeholder="e.g. neuroscience, consciousness, healing" value={keywords} onChange={e => setKeywords(e.target.value)} />
+                  <input
+                    className="rf-input"
+                    placeholder="e.g. neuroscience, consciousness, healing"
+                    value={keywords}
+                    onChange={e => setKeywords(e.target.value)}
+                  />
                 </div>
               </div>
               <div style={{ marginTop: 10, display: "flex", justifyContent: "flex-end" }}>
-                <button className="gen-btn" style={{ width: "auto", padding: "10px 28px", fontSize: 13 }} onClick={() => { if (domain && topic.trim()) setStep(2); else setError("Select a domain and enter a topic first."); }}>
+                <button
+                  className="gen-btn"
+                  style={{ width: "auto", padding: "10px 28px", fontSize: 13 }}
+                  onClick={() => {
+                    if (domain && topic.trim()) setStep(2);
+                    else setError("Select a domain and enter a topic first.");
+                  }}>
                   Continue → Format & Depth
                 </button>
               </div>
@@ -455,18 +542,18 @@ export default function ResearchForge() {
           </>
         )}
 
-        {/* STEP 2: FORMAT & DEPTH */}
+        {/* ── STEP 2: FORMAT + DEPTH ── */}
         {step === 2 && (
           <>
-            {/* LENGTH */}
             <div className="rf-section">
-              <h3>3. Output Length</h3>
-              <div className="hint">// Token budget auto-adjusts for depth multiplier</div>
+              <h3>3. Output length</h3>
+              <div className="hint">// Token budget scales automatically with depth multiplier</div>
               <div className="length-grid">
                 {LENGTH_CATS.map(l => (
-                  <div key={l.id} className={`length-card ${length === l.id ? "selected" : ""}`} onClick={() => setLength(l.id)}>
+                  <div key={l.id}
+                    className={`length-card ${length === l.id ? "selected" : ""}`}
+                    onClick={() => setLength(l.id)}>
                     {l.badge && <span className="pro-badge">{l.badge}</span>}
-                    <div className="lc-icon">{l.icon}</div>
                     <div className="lc-label">{l.label}</div>
                     <div className="lc-desc">{l.desc}</div>
                     <div className="lc-pages">{l.pages}</div>
@@ -475,13 +562,14 @@ export default function ResearchForge() {
               </div>
             </div>
 
-            {/* DEPTH */}
             <div className="rf-section">
-              <h3>4. Research Depth</h3>
+              <h3>4. Research depth</h3>
               <div className="hint">// Multiplies token budget and shifts academic register</div>
               <div className="depth-row">
                 {DEPTHS.map(d => (
-                  <div key={d.id} className={`depth-btn ${depth === d.id ? "selected" : ""}`} onClick={() => setDepth(d.id)}>
+                  <div key={d.id}
+                    className={`depth-btn ${depth === d.id ? "selected" : ""}`}
+                    onClick={() => setDepth(d.id)}>
                     <span className="di">{d.icon}</span>
                     <span className="dl">{d.label}</span>
                     <span className="dd">{d.desc} · ×{d.mult}</span>
@@ -490,13 +578,14 @@ export default function ResearchForge() {
               </div>
             </div>
 
-            {/* STRUCTURE */}
             <div className="rf-section">
-              <h3>5. Document Structure</h3>
+              <h3>5. Document structure</h3>
               <div className="hint">// Sections adapt to domain-specific conventions</div>
               <div className="struct-grid">
                 {STRUCTURES.map(s => (
-                  <div key={s.id} className={`struct-card ${structure === s.id ? "selected" : ""}`} onClick={() => setStructure(s.id)}>
+                  <div key={s.id}
+                    className={`struct-card ${structure === s.id ? "selected" : ""}`}
+                    onClick={() => setStructure(s.id)}>
                     <div className="sc-label">{s.label}</div>
                     <div className="sc-parts">{s.parts.join(" → ")}</div>
                   </div>
@@ -506,11 +595,13 @@ export default function ResearchForge() {
 
             {error && <div style={{ color: "#f87171", fontFamily: "var(--mono)", fontSize: 11, marginTop: 8 }}>⚠ {error}</div>}
 
-            {/* CONFIG SUMMARY */}
+            {/* Config summary */}
             <div style={{ padding: "12px 16px", background: "var(--surface2)", border: "0.5px solid var(--border)", borderRadius: "var(--radius-sm)", fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", marginBottom: 8, lineHeight: 1.8 }}>
               <span style={{ color: "var(--gold)" }}>✦ Config:</span>{" "}
               {domObj?.icon} {domObj?.label} · {lenObj.label} · {depObj.label} · {strObj.label}
               {lenObj.chunked && <span style={{ color: "var(--accent)", marginLeft: 8 }}>⚡ Chunked ({lenObj.chunks} passes)</span>}
+              <span style={{ color: "var(--groq-green)", marginLeft: 8 }}>● Groq primary</span>
+              <span style={{ color: "var(--gemini-blue)", marginLeft: 8 }}>● Gemini fallback</span>
             </div>
 
             <button className="gen-btn" disabled={!canGenerate} onClick={generate}>
@@ -523,12 +614,17 @@ export default function ResearchForge() {
           </>
         )}
 
-        {/* STEP 3: OUTPUT */}
+        {/* ── STEP 3: OUTPUT ── */}
         {step === 3 && (
           <>
-            {/* PROGRESS */}
             {generating && (
               <div className="rf-section">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>Generating via</span>
+                  <span className={`provider-tag ${activeProvider}`}>
+                    {activeProvider === "groq" ? "⚡ Groq · llama-3.3-70b" : "◈ Gemini · fallback"}
+                  </span>
+                </div>
                 <div className="progress-wrap">
                   <div className="progress-label">
                     <span>Generating…</span>
@@ -540,15 +636,18 @@ export default function ResearchForge() {
                 </div>
                 <div className="phase-log">
                   {phases.map((p, i) => (
-                    <div key={i} className={p.type === "ok" ? "pl-ok" : p.type === "err" ? "err" : "pl-run"}>
-                      {p.type === "ok" ? "✓" : p.type === "run" ? "▸" : "✕"} {p.msg}
+                    <div key={i} className={
+                      p.type === "ok"       ? "pl-ok" :
+                      p.type === "fallback" ? "pl-fallback" :
+                      p.type === "err"      ? "pl-err" : "pl-run"
+                    }>
+                      {p.type === "ok" ? "✓" : p.type === "fallback" ? "↻" : p.type === "err" ? "✕" : "▸"} {p.msg}
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* OUTPUT */}
             {output && (
               <div className="output-wrap">
                 <div className="output-topbar">
@@ -566,10 +665,11 @@ export default function ResearchForge() {
                   {generating && <span className="cursor-blink" />}
                 </div>
                 <div className="token-meter">
-                  <div className="tm-item">Estimated tokens: <span className="tm-val">~{tokenCount.toLocaleString()}</span></div>
+                  <div className="tm-item">Est. tokens: <span className="tm-val">~{tokenCount.toLocaleString()}</span></div>
                   <div className="tm-item">Domain: <span className="tm-val">{domObj?.label}</span></div>
                   <div className="tm-item">Depth: <span className="tm-val">×{depObj.mult}</span></div>
                   <div className="tm-item">Chunks: <span className="tm-val">{lenObj.chunked ? lenObj.chunks : 1}</span></div>
+                  <div className="tm-item">Provider: <span className={`tm-provider ${activeProvider}`}>{activeProvider === "groq" ? "Groq" : "Gemini"}</span></div>
                 </div>
               </div>
             )}
